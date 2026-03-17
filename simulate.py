@@ -73,54 +73,68 @@ def _z(kp: dict, metric: str, params: dict[str, tuple[float, float]]) -> float:
     return (float(v) - mean) / std
 
 
-def win_probability(
-    team_a: Team,
-    team_b: Team,
-    *,
-    round_num: int,
-    zparams: dict[str, tuple[float, float]],
-    temperature: float = 0.90,
-) -> float:
-    kp_a = getattr(team_a, "kenpom", None) or {}
-    kp_b = getattr(team_b, "kenpom", None) or {}
+def win_probability(team_a: Team, team_b: Team, round_num: int = 1, temperature: float = 0.80) -> float:
+    import math
 
-    # A-minus-B weighted z-score sum across all KenPom metrics
-    score = 0.0
-    for m in _NUMERIC_METRICS:
-        w = _METRIC_WEIGHTS.get(m, 0.05)
-        diff = _z(kp_a, m, zparams) - _z(kp_b, m, zparams)
+    def logistic(diff: float, scale: float) -> float:
+        return 1.0 / (1.0 + math.exp(-(diff / scale)))
 
-        # defensive efficiency: lower is better
-        if m in ("adj_d", "sos_adj_d"):
-            diff = -diff
+    # --- 1) Base model probability from KenPom AdjEM (fallback to rating, then seed) ---
+    ra = getattr(team_a, "adj_em", None) if hasattr(team_a, "adj_em") else None
+    rb = getattr(team_b, "adj_em", None) if hasattr(team_b, "adj_em") else None
+    if ra is None or rb is None:
+        ra = team_a.rating
+        rb = team_b.rating
+    if ra is None or rb is None:
+        ra = float(17 - team_a.seed)
+        rb = float(17 - team_b.seed)
 
-        score += w * diff
+    # Smaller scale => more chalky favorites
+    p_model = logistic(ra - rb, scale=5.0)
 
-    # Convert score to probability
-    scale = 1.25
-    p_model = 1.0 / (1.0 + math.exp(-(score / scale)))
+    # --- 2) Round-of-64 seed-based caps (P(better seed wins)) ---
+    # Set these to what you consider "normal". If you want this year more chalky,
+    # increase the favorites a bit (e.g. 0.995 for 1v16).
+    r64_fav_win = {
+        (1, 16): 0.995,  # 0.5% upset
+        (2, 15): 0.97,
+        (3, 14): 0.90,
+        (4, 13): 0.85,
+        (5, 12): 0.75,
+        (6, 11): 0.64,
+        (7, 10): 0.60,
+        (8, 9): 0.50,
+    }
 
-    # Seed upset prior
-    s_a, s_b = team_a.seed, team_b.seed
-    better, worse = min(s_a, s_b), max(s_a, s_b)
+    sa, sb = team_a.seed, team_b.seed
+    better, worse = min(sa, sb), max(sa, sb)
 
-    if round_num == 1 and (better, worse) in _UPSET_TABLE_BETTER_SEED_WINS:
-        p_better = _UPSET_TABLE_BETTER_SEED_WINS[(better, worse)]
+    # --- 3) Apply caps in Round 1 ---
+    # Convert cap to "P(team_a wins)" and clamp the model to never exceed upset limits.
+    if round_num == 1 and (better, worse) in r64_fav_win:
+        p_fav = r64_fav_win[(better, worse)]
+        p_underdog = 1.0 - p_fav
+
+        if sa < sb:
+            # team_a is favorite
+            p_cap = p_fav
+            # force at least p_cap (don't allow model to make favorite too weak)
+            p = max(p_model, p_cap)
+        elif sb < sa:
+            # team_a is underdog
+            p_cap = p_underdog
+            # force at most p_cap (don't allow model to give underdog too much)
+            p = min(p_model, p_cap)
+        else:
+            p = p_model
     else:
-        diff_seed = worse - better
-        p_better = 1.0 / (1.0 + math.exp(-diff_seed / 2.2))
+        p = p_model
 
-    p_seed = p_better if s_a == better else (1.0 - p_better)
-
-    w_seed = 0.25 if round_num == 1 else (0.15 if round_num == 2 else 0.10)
-    p = (1.0 - w_seed) * p_model + w_seed * p_seed
-
-    # Temperature transform (chalk tilt)
+    # --- 4) Temperature: <1 more chalk, >1 more random ---
     p = min(max(p, 1e-6), 1 - 1e-6)
     logit = math.log(p / (1 - p))
     p = 1.0 / (1.0 + math.exp(-(logit / temperature)))
-
-    return min(max(p, 0.0), 1.0)
+    return float(min(max(p, 0.0), 1.0))
 
 
 def _resolve_team(source: str, teams_by_id: Dict[int, Team], winners_by_key: Dict[str, int]) -> Team:
@@ -169,7 +183,7 @@ def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
         team1 = _resolve_team(game.team1_source, teams, winners_by_key)
         team2 = _resolve_team(game.team2_source, teams, winners_by_key)
 
-        p = win_probability(team1, team2, round_num=game.round, zparams=zparams, temperature=0.90)
+        p = win_probability(team1, team2, round_num=game.round, temperature=0.80)
         if random.random() < p:
             winner = team1
         else:

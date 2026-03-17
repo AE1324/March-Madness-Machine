@@ -4,6 +4,20 @@ from db import SessionLocal, init_db
 from load_bracket import load_bracket_from_json
 from simulate import generate_brackets
 
+from sqlalchemy import select
+from db import SessionLocal
+from models import TournamentGame
+
+
+def ensure_bracket_loaded(json_path: str = "MM_2026.json") -> None:
+    session = SessionLocal()
+    try:
+        has_games = session.execute(select(TournamentGame).limit(1)).first() is not None
+        if not has_games:
+            from load_bracket import load_bracket_from_json
+            load_bracket_from_json(session, json_path)
+    finally:
+        session.close()
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="March Madness bracket simulator")
