@@ -148,7 +148,7 @@ st.title("March Madness Bracket Simulator")
 st.caption("Generate and view AI-driven brackets using KenPom-based probabilities.")
 
 col_left, col_right = st.columns(2)
-tab_results, tab_stats = st.tabs(["Enter Results", "Stats"])
+tab_results, tab_stats, tab_admin = st.tabs(["Enter Results", "Stats", "Admin"])
 
 with tab_results:
     st.subheader("Enter real results")
@@ -238,7 +238,17 @@ with tab_stats:
         st.dataframe(pick_percentages_by_round(session, rnd), use_container_width=True)
 
 
+with tab_admin:
+    st.subheader("Admin")
 
+    st.write("Clear all generated brackets (keeps teams, games, and results).")
+
+    if st.button("Delete ALL brackets and picks"):
+        engine = get_engine()
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text("TRUNCATE TABLE bracket_picks, brackets RESTART IDENTITY CASCADE;"))
+        st.success("All brackets and picks deleted. You can generate fresh ones now.")
 
 with col_left:
     st.subheader("Generate brackets")
@@ -250,13 +260,7 @@ with col_left:
         value=1,
         step=1,
     )
-    temperature = st.slider(
-        "Chalk vs randomness (lower = more chalk, higher = more chaos)",
-        min_value=0.5,
-        max_value=1.5,
-        value=0.9,
-        step=0.05,
-    )
+    
 
     if st.button("Generate", type="primary"):
         engine = get_engine()

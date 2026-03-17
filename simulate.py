@@ -79,9 +79,9 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
     # --- Historical seed vs seed priors (P(better seed wins)) ---
 
     HIST_R64 = {
-        (1, 16): 0.995,
-        (2, 15): 0.955,
-        (3, 14): 0.875,
+        (1, 16): 0.993,
+        (2, 15): 0.935,
+        (3, 14): 0.855,
         (4, 13): 0.790,
         (5, 12): 0.670,
         (6, 11): 0.620,
