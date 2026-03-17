@@ -73,7 +73,14 @@ def _z(kp: dict, metric: str, params: dict[str, tuple[float, float]]) -> float:
     return (float(v) - mean) / std
 
 
-def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
+def win_probability(
+    team_a: Team,
+    team_b: Team,
+    round_num: int = 1,
+    region_noise: float = 0.0,
+    strength_shock_a: float = 0.0,
+    strength_shock_b: float = 0.0,
+) -> float:
     import math
 
     # --- Historical seed vs seed priors (P(better seed wins)) ---
@@ -163,8 +170,9 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
     def inv_logit(z: float) -> float:
         return 1.0 / (1.0 + math.exp(-z))
 
-    # --- 1) KenPom model probability (AdjEM-based) with round-specific scale ---
+    # --- 1) KenPom model probability with per-game strength shocks ---
 
+    # Base ratings
     ra = getattr(team_a, "adj_em", None) if hasattr(team_a, "adj_em") else None
     rb = getattr(team_b, "adj_em", None) if hasattr(team_b, "adj_em") else None
 
@@ -172,12 +180,21 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
         ra = team_a.rating
         rb = team_b.rating
     if ra is None or rb is None:
+        # last resort: seed-based pseudo-rating
         ra = float(17 - team_a.seed)
         rb = float(17 - team_b.seed)
 
-    scale = SCALE_BY_ROUND.get(round_num, 4.5)
-    p_model = logistic(ra - rb, scale)
+    # Effective per-game strengths including performance shocks
+    ra_eff = ra + strength_shock_a
+    rb_eff = rb + strength_shock_b
 
+    raw_gap = ra_eff - rb_eff
+
+    # Non-linear compression: big gaps shrink, mid gaps stay meaningful
+    gap = math.copysign(abs(raw_gap) ** 0.8, raw_gap)
+
+    scale = SCALE_BY_ROUND.get(round_num, 4.5)
+    p_model = logistic(gap, scale)
     # --- 2) Historical prior with KenPom-adjusted effective seed gap ---
 
     sa, sb = team_a.seed, team_b.seed
@@ -313,7 +330,20 @@ def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
         team1 = _resolve_team(game.team1_source, teams, winners_by_key)
         team2 = _resolve_team(game.team2_source, teams, winners_by_key)
 
-        p = win_probability(team1, team2, round_num=game.round, region_noise=noise)
+        # Game-level performance shocks (in KenPom points)
+        shock_sd = 3.5  # tuneable
+        strength_shock_a = random.gauss(0.0, shock_sd)
+        strength_shock_b = random.gauss(0.0, shock_sd)
+
+        p = win_probability(
+            team1,
+            team2,
+            round_num=game.round,
+            region_noise=noise,
+            strength_shock_a=strength_shock_a,
+            strength_shock_b=strength_shock_b,
+        )
+
         if random.random() < p:
             winner = team1
         else:
