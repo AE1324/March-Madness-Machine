@@ -118,40 +118,40 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
 
     # KenPom model weight (logit blend) by round
     ALPHA_BY_ROUND = {
-        1: 0.60,
-        2: 0.75,
-        3: 0.88,
-        4: 0.93,
-        5: 0.97,
-        6: 0.99,
+        1: 0.50,
+        2: 0.65,
+        3: 0.80,
+        4: 0.88,
+        5: 0.92,
+        6: 0.94
     }
 
     # Round-dependent KenPom logistic scale (later rounds more deterministic)
     SCALE_BY_ROUND = {
-        1: 4.6,
-        2: 4.5,
-        3: 4.3,
-        4: 4.1,
-        5: 3.9,
-        6: 3.8,
+        1: 4.8,
+        2: 4.7,
+        3: 4.6,
+        4: 4.5,
+        5: 4.4,
+        6: 4.3
     }
 
     # Round-dependent temperature
     TEMP_BY_ROUND = {
-        1: 1.05,
-        2: 0.98,
-        3: 0.93,
-        4: 0.90,
-        5: 0.88,
-        6: 0.85,
+        1: 1.10,
+        2: 1.04,
+        3: 0.96,
+        4: 0.92,
+        5: 0.90,
+        6: 0.88
     }
 
     # Extreme R64 upset caps (max underdog win probability)
     MAX_UNDERDOG_R64 = {
-        (1, 16): 0.012,  # ≈1.2%
-        (2, 15): 0.045,
-        (3, 14): 0.10,
-        (4, 13): 0.18,
+        (1, 16): 0.015,  # ≈1.5%
+        (2, 15): 0.055,
+        (3, 14): 0.12,
+        (4, 13): 0.20,
     }
 
     def logistic(diff: float, scale: float) -> float:
@@ -199,7 +199,7 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
         # positive if B is weaker rank than A (A has lower/better rank)
         rank_gap = (rank_b - rank_a)
         # standardize roughly: assume top ~100 teams matter most
-        z_rank = rank_gap / 30.0  # tune denominator if needed
+        z_rank = rank_gap / 18.0  # tune denominator if needed
         # effective seed gap: move priors toward KenPom when seeds lie
         seed_gap = worse_seed - better_seed
         effective_seed_gap = seed_gap - 0.35 * z_rank
