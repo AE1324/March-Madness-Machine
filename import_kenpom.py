@@ -43,37 +43,31 @@ def main() -> None:
         updated = 0
         missing: list[str] = []
 
-        with open(args.csv_path, "r", encoding="utf-8", newline="") as f:
+        with open(args.csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            for row in reader:
-                name = (row.get("team_name") or "").strip()
-                if not name:
-                    continue
+            for idx, row in enumerate(reader, start=1):
+                name = (row["team_name"] or "").strip()
+                
 
-                team = teams_by_name.get(name)
-                if not team:
+                if name not in teams_by_name:
                     missing.append(name)
                     continue
 
-                # Fill explicit KenPom columns on Team
-                rk_str = (row.get("rk") or "").strip()
-                rank = int(rk_str) if rk_str else None
+                team = teams_by_name[name]
 
-                team.kenpom_rank = rank
+                # Rank is just the order in the cleaned file
+                team.kenpom_rank = idx
                 team.adj_em = float(row["adj_em"])
                 team.adj_o = float(row["adj_o"])
                 team.adj_d = float(row["adj_d"])
-                team.adj_tempo = float(row["adj_tempo"])
+                team.ad_tempo = float(row["adj_tempo"]) if "adj_tempo" in row else team.ad_tempo
                 team.luck = float(row["luck"])
                 team.sos_adj_em = float(row["sos_adj_em"])
                 team.sos_adj_o = float(row["sos_adj_o"])
                 team.sos_adj_d = float(row["sos_adj_d"])
                 team.ncsos_adj_em = float(row["ncsos_adj_em"])
 
-                # keep rating = AdjEM for compatibility
-                team.rating = team.adj_em
-
-                # Also keep teams.rating in sync with AdjEM (backward compatibility)
+                # make rating = AdjEM
                 team.rating = team.adj_em
 
                 updated += 1
