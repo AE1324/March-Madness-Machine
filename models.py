@@ -61,7 +61,7 @@ class RealResult(Base):
         Integer, ForeignKey("tournament_games.id"), primary_key=True
     )
     winner_team_id: Mapped[int] = mapped_column(Integer, ForeignKey("teams.id"), nullable=False)
-    loser_team_id: Mapped[int] = mapped_column(Integer, ForeignKey("teams.id"), nullable=False)
+    loser_team_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("teams.id"), nullable=True)
 
 
 class Bracket(Base):

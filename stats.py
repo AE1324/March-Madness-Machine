@@ -3,11 +3,11 @@ from sqlalchemy.orm import Session
 
 
 def count_perfect_brackets(session: Session) -> int:
-    # Perfect = no wrong picks among games that have results
     q = text("""
     with played as (
       select game_id, winner_team_id
       from real_results
+      where winner_team_id is not null
     ),
     wrong as (
       select bp.bracket_id
@@ -24,11 +24,11 @@ def count_perfect_brackets(session: Session) -> int:
 
 
 def leaderboard(session: Session, limit: int = 25):
-    # Score = number of correct picks so far (only games with results)
     q = text("""
     with played as (
       select game_id, winner_team_id
       from real_results
+      where winner_team_id is not null
     ),
     scored as (
       select
@@ -52,8 +52,6 @@ def leaderboard(session: Session, limit: int = 25):
 
 
 def pick_percentages_by_round(session: Session, round_num: int):
-    # % of brackets picking each team to win games in this round
-    # denominator = number of brackets (not number of picks), so champion % is straightforward.
     q = text("""
     with n as (select count(*)::float as n from brackets),
     picks as (

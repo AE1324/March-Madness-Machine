@@ -14,6 +14,7 @@ from simulate import simulate_single_bracket
 from view_bracket import main as view_bracket_main  # we'll re-use its logic indirectly
 from main import ensure_bracket_loaded
 
+from sqlalchemy import text
 from stats import count_perfect_brackets, leaderboard, pick_percentages_by_round
 
 
@@ -154,29 +155,72 @@ with tab_results:
 
     engine = get_engine()
     with Session(engine) as session:
-        games = session.query(TournamentGame).order_by(TournamentGame.round, TournamentGame.id).all()
-        teams = session.query(Team).order_by(Team.region, Team.seed, Team.name).all()
+        games = (
+            session.query(TournamentGame)
+            .order_by(TournamentGame.round, TournamentGame.id)
+            .all()
+        )
+        teams = {t.id: t for t in session.query(Team).all()}
 
-        game_opts = {f"R{g.round} {g.region or 'FF'} {g.slot} (game_id={g.id})": g.id for g in games}
-        team_opts = {f"({t.seed}) {t.name} [{t.region}]": t.id for t in teams}
+        if not games:
+            st.warning("No tournament games found. Load the bracket first.")
+        else:
+            # Pick a game
+            game_labels = {
+                f"R{g.round} {g.region or 'FF'} {g.slot} (game_id={g.id})": g
+                for g in games
+            }
+            sel_label = st.selectbox("Game", list(game_labels.keys()))
+            game = game_labels[sel_label]
 
-        sel_game_label = st.selectbox("Game", list(game_opts.keys()))
-        sel_winner_label = st.selectbox("Winner", list(team_opts.keys()))
+            # Helper to resolve team IDs for this game
+            def resolve_team_id(source: str) -> int:
+                if source.startswith("TEAM-"):
+                    return int(source.split("-", 1)[1])
+                if source.startswith("WIN-"):
+                    gid = int(source.split("-", 1)[1])
+                    winner = (
+                        session.query(RealResult)
+                        .filter(RealResult.game_id == gid)
+                        .one_or_none()
+                    )
+                    if not winner:
+                        raise ValueError(f"Upstream game {gid} has no result yet.")
+                    return winner.winner_team_id
+                raise ValueError(f"Unknown source: {source}")
 
-        if st.button("Save result"):
-            gid = game_opts[sel_game_label]
-            wid = team_opts[sel_winner_label]
-            # upsert
-            session.execute(
-                text("""
-                insert into real_results (game_id, winner_team_id, loser_team_id)
-                values (:gid, :wid, :wid)
-                on conflict (game_id) do update set winner_team_id = excluded.winner_team_id;
-                """),
-                {"gid": gid, "wid": wid},
-            )
-            session.commit()
-            st.success("Saved.")
+            try:
+                t1_id = resolve_team_id(game.team1_source)
+                t2_id = resolve_team_id(game.team2_source)
+                t1 = teams[t1_id]
+                t2 = teams[t2_id]
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
+
+            st.write(f"**Matchup:** R{game.round} {game.region or 'FF'} {game.slot}")
+            col_a, col_b = st.columns(2)
+
+            def save_winner(winner_id: int):
+                session.execute(
+                    text("""
+                    insert into real_results (game_id, winner_team_id, loser_team_id)
+                    values (:gid, :wid, null)
+                    on conflict (game_id)
+                    do update set winner_team_id = excluded.winner_team_id;
+                    """),
+                    {"gid": game.id, "wid": winner_id},
+                )
+                session.commit()
+                st.success("Saved result.")
+
+            with col_a:
+                if st.button(f"Winner: ({t1.seed}) {t1.name}", key=f"win_{game.id}_t1"):
+                    save_winner(t1_id)
+
+            with col_b:
+                if st.button(f"Winner: ({t2.seed}) {t2.name}", key=f"win_{game.id}_t2"):
+                    save_winner(t2_id)
 
 
 with tab_stats:
@@ -184,16 +228,14 @@ with tab_stats:
 
     engine = get_engine()
     with Session(engine) as session:
-        perfect = count_perfect_brackets(session)
-        st.metric("Perfect brackets remaining", perfect)
+        st.metric("Perfect brackets remaining", count_perfect_brackets(session))
 
         st.subheader("Leaderboard (most correct picks so far)")
-        st.dataframe(leaderboard(session, limit=25), use_container_width=True)
+        st.dataframe(leaderboard(session, limit=50), use_container_width=True)
 
         st.subheader("Pick percentages by round")
         rnd = st.selectbox("Round", [1, 2, 3, 4, 5, 6], index=0)
-        pct = pick_percentages_by_round(session, rnd)
-        st.dataframe(pct, use_container_width=True)
+        st.dataframe(pick_percentages_by_round(session, rnd), use_container_width=True)
 
 
 
