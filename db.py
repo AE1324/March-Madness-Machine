@@ -9,7 +9,9 @@ class Base(DeclarativeBase):
 # Default to a local SQLite database. You can change this to a PostgreSQL URL
 # like "postgresql+psycopg2://user:password@localhost:5432/brackets"
 import os
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///brackets.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set. Set it to your Postgres URL before running.")
 
 
 
