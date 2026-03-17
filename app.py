@@ -233,22 +233,86 @@ with tab_stats:
         st.subheader("Leaderboard (most correct picks so far)")
         st.dataframe(leaderboard(session, limit=50), use_container_width=True)
 
-        st.subheader("Pick percentages by round")
-        rnd = st.selectbox("Round", [1, 2, 3, 4, 5, 6], index=0)
-        st.dataframe(pick_percentages_by_round(session, rnd), use_container_width=True)
+    
+    st.subheader("Pick percentages by round")
 
+    rnd = st.selectbox("Round", [1, 2, 3, 4, 5, 6], index=0)
+
+    engine = get_engine()
+    with Session(engine) as session:
+        from sqlalchemy import text
+        rows = session.execute(
+            text("""
+            SELECT
+              t.name,
+              t.seed,
+              t.region,
+              ps.picks,
+              ps.pct
+            FROM pick_stats ps
+            JOIN teams t ON t.id = ps.team_id
+            WHERE ps.round = :rnd
+            ORDER BY ps.pct DESC, t.seed ASC, t.name ASC;
+            """),
+            {"rnd": rnd},
+        ).mappings().all()
+
+    st.dataframe(rows, use_container_width=True)
+    st.caption("Update via Admin → Recompute pick percentages.")
+    
 
 with tab_admin:
     st.subheader("Admin")
 
-    st.write("Clear all generated brackets (keeps teams, games, and results).")
+    st.subheader("Reset data")
 
-    if st.button("Delete ALL brackets and picks"):
+    clear_brackets = st.checkbox("Confirm: delete ALL generated brackets and picks")
+    if st.button("Delete brackets & picks", disabled=not clear_brackets):
         engine = get_engine()
         from sqlalchemy import text
         with engine.begin() as conn:
             conn.execute(text("TRUNCATE TABLE bracket_picks, brackets RESTART IDENTITY CASCADE;"))
-        st.success("All brackets and picks deleted. You can generate fresh ones now.")
+        st.success("All brackets and picks deleted.")
+
+    clear_results = st.checkbox("Confirm: delete ALL entered real results")
+    if st.button("Delete real results", disabled=not clear_results):
+        engine = get_engine()
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text("TRUNCATE TABLE real_results RESTART IDENTITY CASCADE;"))
+        st.success("All real results deleted.")
+
+
+    
+    st.subheader("Pick stats")
+
+    if st.button("Recompute pick percentages (all brackets)"):
+        engine = get_engine()
+        from sqlalchemy import text
+        with engine.begin() as conn:
+            conn.execute(text("TRUNCATE TABLE pick_stats;"))
+            conn.execute(text("""
+            INSERT INTO pick_stats (round, team_id, picks, pct)
+            WITH n AS (
+              SELECT count(*)::float AS n FROM brackets
+            ),
+            raw AS (
+              SELECT
+                tg.round,
+                bp.predicted_winner_team_id AS team_id,
+                count(*)::float AS picks
+              FROM bracket_picks bp
+              JOIN tournament_games tg ON tg.id = bp.game_id
+              GROUP BY tg.round, bp.predicted_winner_team_id
+            )
+            SELECT
+              r.round,
+              r.team_id,
+              r.picks,
+              r.picks / nullif((SELECT n FROM n), 0)
+            FROM raw r;
+            """))
+        st.success("Pick stats recomputed.")
 
 with col_left:
     st.subheader("Generate brackets")
@@ -265,12 +329,24 @@ with col_left:
     if st.button("Generate", type="primary"):
         engine = get_engine()
         new_ids = []
+
+        progress = st.progress(0)
+        status = st.empty()
+
+        total = int(n)
         with Session(engine) as session:
             from simulate import simulate_single_bracket as sim_one
-            for _ in range(int(n)):
+            for i in range(total):
                 bid = sim_one(session)
                 new_ids.append(bid)
+
+                # update progress bar
+                pct = int((i + 1) / total * 100)
+                progress.progress(pct)
+                status.text(f"Generated {i + 1} of {total} brackets...")
+
         if new_ids:
+            status.text("")  # clear status
             st.success(f"Generated {len(new_ids)} bracket(s). Latest ID: {new_ids[-1]}")
             st.session_state["last_bracket_id"] = new_ids[-1]
 

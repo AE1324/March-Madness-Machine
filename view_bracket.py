@@ -6,7 +6,7 @@ from collections import defaultdict
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from models import Team, TournamentGame, BracketPick
+from models import Team, TournamentGame, Bracket, BracketPick
 
 REGIONS = ["East", "West", "South", "Midwest"]
 ROUND_LABEL = {1: "Round of 64", 2: "Round of 32", 3: "Sweet 16", 4: "Elite 8"}
@@ -30,7 +30,6 @@ def _resolve_team_id(source: str, winner_by_game_id: dict[int, int]) -> int:
 
 
 def _seeded_name(team: Team) -> str:
-    # Always show seed, all rounds
     return f"({team.seed}) {team.name}"
 
 
@@ -48,7 +47,17 @@ def main() -> None:
     db_url = os.getenv("DATABASE_URL", "sqlite:///brackets.db")
     engine = create_engine(db_url, future=True)
 
+    bracket_created_at = None
+
     with Session(engine) as session:
+        # Load bracket (for timestamp) + all related data
+        bracket = (
+            session.query(Bracket)
+            .filter(Bracket.id == args.bracket_id)
+            .one()
+        )
+        bracket_created_at = bracket.created_at
+
         teams = session.query(Team).all()
         teams_by_id = {t.id: t for t in teams}
 
@@ -71,7 +80,9 @@ def main() -> None:
             raise SystemExit("No tournament games found. Load a bracket first.")
 
         # Build per-region per-round ordered lists of games
-        region_games: dict[str, dict[int, list[TournamentGame]]] = {r: defaultdict(list) for r in REGIONS}
+        region_games: dict[str, dict[int, list[TournamentGame]]] = {
+            r: defaultdict(list) for r in REGIONS
+        }
         final_four_games: list[TournamentGame] = []
         championship_games: list[TournamentGame] = []
 
@@ -83,7 +94,6 @@ def main() -> None:
             elif g.round == 6:
                 championship_games.append(g)
 
-        # sort each round in each region by G#
         for r in REGIONS:
             for rnd in (1, 2, 3, 4):
                 region_games[r][rnd].sort(key=lambda gg: _slot_gnum(gg.slot))
@@ -92,12 +102,16 @@ def main() -> None:
             tid = _resolve_team_id(source, winner_by_game_id)
             return _seeded_name(teams_by_id[tid])
 
-        emit("MARCH MADNESS BRACKET (64 TEAMS)")
-        emit("")
-        emit(f"BRACKET ID: {args.bracket_id}")
+        # Header with ID and timestamp
+        emit(f"BRACKET ID {args.bracket_id}")
+        if bracket_created_at is not None:
+            emit(f"CREATED AT (UTC) {bracket_created_at.isoformat()}")
         emit("")
 
-        # Regions in the exact order the user showed
+        emit("MARCH MADNESS BRACKET (64 TEAMS)")
+        emit("")
+
+        # Regions in standard order
         for region in ["East", "West", "South", "Midwest"]:
             emit(f"{region.upper()} REGION")
 
