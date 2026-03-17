@@ -1,0 +1,56 @@
+{
+  "teams": [
+    {
+      "id": 1,
+      "name": "Team A",
+      "seed": 1,
+      "region": "Region1",
+      "rating": 30.0
+    },
+    {
+      "id": 2,
+      "name": "Team B",
+      "seed": 16,
+      "region": "Region1",
+      "rating": 10.0
+    },
+    {
+      "id": 3,
+      "name": "Team C",
+      "seed": 8,
+      "region": "Region1",
+      "rating": 20.0
+    },
+    {
+      "id": 4,
+      "name": "Team D",
+      "seed": 9,
+      "region": "Region1",
+      "rating": 19.0
+    }
+  ],
+  "games": [
+    {
+      "round": 1,
+      "region": "Region1",
+      "slot": "R1-G1",
+      "team1_source": "TEAM-1",
+      "team2_source": "TEAM-2"
+    },
+    {
+      "round": 1,
+      "region": "Region1",
+      "slot": "R1-G2",
+      "team1_source": "TEAM-3",
+      "team2_source": "TEAM-4"
+    },
+    {
+      "round": 2,
+      "region": "Region1",
+      "slot": "R2-G1",
+      "team1_source": "WIN-1",
+      "team2_source": "WIN-2"
+    }
+  ]
+}
+
