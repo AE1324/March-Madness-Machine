@@ -14,6 +14,8 @@ from simulate import simulate_single_bracket
 from view_bracket import main as view_bracket_main  # we'll re-use its logic indirectly
 from main import ensure_bracket_loaded
 
+from stats import count_perfect_brackets, leaderboard, pick_percentages_by_round
+
 
 # --- DB helpers ---
 
@@ -145,6 +147,56 @@ st.title("March Madness Bracket Simulator")
 st.caption("Generate and view AI-driven brackets using KenPom-based probabilities.")
 
 col_left, col_right = st.columns(2)
+tab_results, tab_stats = st.tabs(["Enter Results", "Stats"])
+
+with tab_results:
+    st.subheader("Enter real results")
+
+    engine = get_engine()
+    with Session(engine) as session:
+        games = session.query(TournamentGame).order_by(TournamentGame.round, TournamentGame.id).all()
+        teams = session.query(Team).order_by(Team.region, Team.seed, Team.name).all()
+
+        game_opts = {f"R{g.round} {g.region or 'FF'} {g.slot} (game_id={g.id})": g.id for g in games}
+        team_opts = {f"({t.seed}) {t.name} [{t.region}]": t.id for t in teams}
+
+        sel_game_label = st.selectbox("Game", list(game_opts.keys()))
+        sel_winner_label = st.selectbox("Winner", list(team_opts.keys()))
+
+        if st.button("Save result"):
+            gid = game_opts[sel_game_label]
+            wid = team_opts[sel_winner_label]
+            # upsert
+            session.execute(
+                text("""
+                insert into real_results (game_id, winner_team_id, loser_team_id)
+                values (:gid, :wid, :wid)
+                on conflict (game_id) do update set winner_team_id = excluded.winner_team_id;
+                """),
+                {"gid": gid, "wid": wid},
+            )
+            session.commit()
+            st.success("Saved.")
+
+
+with tab_stats:
+    st.subheader("Tournament stats")
+
+    engine = get_engine()
+    with Session(engine) as session:
+        perfect = count_perfect_brackets(session)
+        st.metric("Perfect brackets remaining", perfect)
+
+        st.subheader("Leaderboard (most correct picks so far)")
+        st.dataframe(leaderboard(session, limit=25), use_container_width=True)
+
+        st.subheader("Pick percentages by round")
+        rnd = st.selectbox("Round", [1, 2, 3, 4, 5, 6], index=0)
+        pct = pick_percentages_by_round(session, rnd)
+        st.dataframe(pct, use_container_width=True)
+
+
+
 
 with col_left:
     st.subheader("Generate brackets")
