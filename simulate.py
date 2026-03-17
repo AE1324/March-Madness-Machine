@@ -73,15 +73,101 @@ def _z(kp: dict, metric: str, params: dict[str, tuple[float, float]]) -> float:
     return (float(v) - mean) / std
 
 
-def win_probability(team_a: Team, team_b: Team, round_num: int = 1, temperature: float = 0.80) -> float:
+def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
     import math
 
-    def logistic(diff: float, scale: float) -> float:
-        return 1.0 / (1.0 + math.exp(-(diff / scale)))
+    # --- Historical seed vs seed priors (P(better seed wins)) ---
 
-    # --- 1) Base model probability from KenPom AdjEM (fallback to rating, then seed) ---
+    HIST_R64 = {
+        (1, 16): 0.995,
+        (2, 15): 0.955,
+        (3, 14): 0.875,
+        (4, 13): 0.790,
+        (5, 12): 0.670,
+        (6, 11): 0.620,
+        (7, 10): 0.605,
+        (8, 9):  0.505,
+    }
+
+    HIST_R32 = {
+        (1, 8): 0.75, (1, 9): 0.75,
+        (2, 7): 0.70, (2, 10): 0.70,
+        (3, 6): 0.65, (3, 11): 0.65,
+        (4, 5): 0.60, (4, 12): 0.60,
+        (5, 13): 0.65, (6, 14): 0.70, (7, 15): 0.75, (8, 16): 0.80,
+    }
+
+    HIST_S16 = {
+        (1, 4): 0.70, (1, 5): 0.70, (1, 8): 0.80,
+        (2, 3): 0.60, (2, 6): 0.65, (2, 7): 0.70,
+        (3, 4): 0.55, (3, 5): 0.60, (3, 8): 0.75,
+    }
+
+    HIST_E8 = {
+        (1, 2): 0.60, (1, 3): 0.65, (1, 4): 0.70,
+        (2, 3): 0.55, (2, 4): 0.60,
+        (3, 4): 0.55,
+    }
+
+    HIST_BY_ROUND = {
+        1: HIST_R64,
+        2: HIST_R32,
+        3: HIST_S16,
+        4: HIST_E8,
+    }
+
+    # KenPom model weight (logit blend) by round
+    ALPHA_BY_ROUND = {
+        1: 0.60,
+        2: 0.75,
+        3: 0.88,
+        4: 0.93,
+        5: 0.97,
+        6: 0.99,
+    }
+
+    # Round-dependent KenPom logistic scale (later rounds more deterministic)
+    SCALE_BY_ROUND = {
+        1: 4.6,
+        2: 4.5,
+        3: 4.3,
+        4: 4.1,
+        5: 3.9,
+        6: 3.8,
+    }
+
+    # Round-dependent temperature
+    TEMP_BY_ROUND = {
+        1: 1.05,
+        2: 0.98,
+        3: 0.93,
+        4: 0.90,
+        5: 0.88,
+        6: 0.85,
+    }
+
+    # Extreme R64 upset caps (max underdog win probability)
+    MAX_UNDERDOG_R64 = {
+        (1, 16): 0.012,  # ≈1.2%
+        (2, 15): 0.045,
+        (3, 14): 0.10,
+        (4, 13): 0.18,
+    }
+
+    def logistic(diff: float, scale: float) -> float:
+        return 1.0 / (1.0 + math.exp(-diff / scale))
+
+    def logit(x: float) -> float:
+        return math.log(x / (1 - x))
+
+    def inv_logit(z: float) -> float:
+        return 1.0 / (1.0 + math.exp(-z))
+
+    # --- 1) KenPom model probability (AdjEM-based) with round-specific scale ---
+
     ra = getattr(team_a, "adj_em", None) if hasattr(team_a, "adj_em") else None
     rb = getattr(team_b, "adj_em", None) if hasattr(team_b, "adj_em") else None
+
     if ra is None or rb is None:
         ra = team_a.rating
         rb = team_b.rating
@@ -89,51 +175,80 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1, temperature:
         ra = float(17 - team_a.seed)
         rb = float(17 - team_b.seed)
 
-    # Smaller scale => more chalky favorites
-    p_model = logistic(ra - rb, scale=5.0)
+    scale = SCALE_BY_ROUND.get(round_num, 4.5)
+    p_model = logistic(ra - rb, scale)
 
-    # --- 2) Round-of-64 seed-based caps (P(better seed wins)) ---
-    # Set these to what you consider "normal". If you want this year more chalky,
-    # increase the favorites a bit (e.g. 0.995 for 1v16).
-    r64_fav_win = {
-        (1, 16): 0.995,  # 0.5% upset
-        (2, 15): 0.97,
-        (3, 14): 0.90,
-        (4, 13): 0.85,
-        (5, 12): 0.75,
-        (6, 11): 0.64,
-        (7, 10): 0.60,
-        (8, 9): 0.50,
-    }
+    # --- 2) Historical prior with KenPom-adjusted effective seed gap ---
 
     sa, sb = team_a.seed, team_b.seed
-    better, worse = min(sa, sb), max(sa, sb)
+    better_seed, worse_seed = min(sa, sb), max(sa, sb)
 
-    # --- 3) Apply caps in Round 1 ---
-    # Convert cap to "P(team_a wins)" and clamp the model to never exceed upset limits.
-    if round_num == 1 and (better, worse) in r64_fav_win:
-        p_fav = r64_fav_win[(better, worse)]
-        p_underdog = 1.0 - p_fav
+    # base historical table
+    hist_table = HIST_BY_ROUND.get(round_num, {})
+    p_hist_fav = hist_table.get((better_seed, worse_seed))
 
-        if sa < sb:
-            # team_a is favorite
-            p_cap = p_fav
-            # force at least p_cap (don't allow model to make favorite too weak)
-            p = max(p_model, p_cap)
-        elif sb < sa:
-            # team_a is underdog
-            p_cap = p_underdog
-            # force at most p_cap (don't allow model to give underdog too much)
-            p = min(p_model, p_cap)
-        else:
-            p = p_model
+    if p_hist_fav is None:
+        # fallback seed curve (slightly steeper)
+        diff = (worse_seed - better_seed)
+        p_hist_fav = logistic(diff, scale=2.0)
+
+    # KenPom rank adjustment (only for early rounds)
+    rank_a = getattr(team_a, "kenpom_rank", None)
+    rank_b = getattr(team_b, "kenpom_rank", None)
+    if rank_a is not None and rank_b is not None and round_num <= 2:
+        # positive if B is weaker rank than A (A has lower/better rank)
+        rank_gap = (rank_b - rank_a)
+        # standardize roughly: assume top ~100 teams matter most
+        z_rank = rank_gap / 30.0  # tune denominator if needed
+        # effective seed gap: move priors toward KenPom when seeds lie
+        seed_gap = worse_seed - better_seed
+        effective_seed_gap = seed_gap - 0.35 * z_rank
+        p_hist_fav = logistic(effective_seed_gap, scale=2.3)
+
+    if sa == better_seed:
+        p_hist = p_hist_fav
+    elif sb == better_seed:
+        p_hist = 1.0 - p_hist_fav
     else:
-        p = p_model
+        p_hist = 0.5
 
-    # --- 4) Temperature: <1 more chalk, >1 more random ---
+    # --- 3) Logit-space blend between KenPom model and historical prior ---
+
+    alpha = ALPHA_BY_ROUND.get(round_num, 0.9)
+
+    p_model = min(max(p_model, 1e-6), 1 - 1e-6)
+    p_hist = min(max(p_hist, 1e-6), 1 - 1e-6)
+
+    z_model = logit(p_model)
+    z_hist = logit(p_hist)
+
+    z_blend = alpha * z_model + (1.0 - alpha) * z_hist
+    p = inv_logit(z_blend)
+
+    # --- 4) Round-dependent temperature transform ---
+
+    temp = TEMP_BY_ROUND.get(round_num, 0.9)
     p = min(max(p, 1e-6), 1 - 1e-6)
-    logit = math.log(p / (1 - p))
-    p = 1.0 / (1.0 + math.exp(-(logit / temperature)))
+    z = logit(p)
+    p = inv_logit(z / temp)
+
+    # --- 6) Apply R64 extreme upset caps ---
+
+    if round_num == 1 and (better_seed, worse_seed) in MAX_UNDERDOG_R64:
+        max_ud = MAX_UNDERDOG_R64[(better_seed, worse_seed)]
+        if sa < sb:
+            # team_a favorite
+            p_ud = 1.0 - p
+            if p_ud > max_ud:
+                p = 1.0 - max_ud
+        else:
+            # team_a underdog
+            p_ud = p
+            if p_ud > max_ud:
+                p = max_ud
+
+    
+
     return float(min(max(p, 0.0), 1.0))
 
 
@@ -183,7 +298,7 @@ def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
         team1 = _resolve_team(game.team1_source, teams, winners_by_key)
         team2 = _resolve_team(game.team2_source, teams, winners_by_key)
 
-        p = win_probability(team1, team2, round_num=game.round, temperature=0.80)
+        p = win_probability(team1, team2, round_num=game.round)
         if random.random() < p:
             winner = team1
         else:

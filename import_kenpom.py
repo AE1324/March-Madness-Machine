@@ -56,15 +56,22 @@ def main() -> None:
                     continue
 
                 # Fill explicit KenPom columns on Team
-                team.adj_em = to_float(row.get("adj_em", "")) or 0.0
-                team.adj_o = to_float(row.get("adj_o", "")) or 0.0
-                team.adj_d = to_float(row.get("adj_d", "")) or 0.0
-                team.adj_tempo = to_float(row.get("adj_tempo", "")) or 0.0
-                team.luck = to_float(row.get("luck", "")) or 0.0
-                team.sos_adj_em = to_float(row.get("sos_adj_em", "")) or 0.0
-                team.sos_adj_o = to_float(row.get("sos_adj_o", "")) or 0.0
-                team.sos_adj_d = to_float(row.get("sos_adj_d", "")) or 0.0
-                team.ncsos_adj_em = to_float(row.get("ncsos_adj_em", "")) or 0.0
+                rk_str = (row.get("rk") or "").strip()
+                rank = int(rk_str) if rk_str else None
+
+                team.kenpom_rank = rank
+                team.adj_em = float(row["adj_em"])
+                team.adj_o = float(row["adj_o"])
+                team.adj_d = float(row["adj_d"])
+                team.adj_tempo = float(row["adj_tempo"])
+                team.luck = float(row["luck"])
+                team.sos_adj_em = float(row["sos_adj_em"])
+                team.sos_adj_o = float(row["sos_adj_o"])
+                team.sos_adj_d = float(row["sos_adj_d"])
+                team.ncsos_adj_em = float(row["ncsos_adj_em"])
+
+                # keep rating = AdjEM for compatibility
+                team.rating = team.adj_em
 
                 # Also keep teams.rating in sync with AdjEM (backward compatibility)
                 team.rating = team.adj_em

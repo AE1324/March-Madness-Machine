@@ -24,6 +24,7 @@ class Team(Base):
     region: Mapped[str] = mapped_column(String, nullable=False)
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
     kenpom: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    kenpom_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
     adj_em: Mapped[float | None] = mapped_column(Float, nullable=True)
     adj_o: Mapped[float | None] = mapped_column(Float, nullable=True)
     adj_d: Mapped[float | None] = mapped_column(Float, nullable=True)
