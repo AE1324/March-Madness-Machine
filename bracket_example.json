@@ -1,56 +1,150 @@
 {
   "teams": [
-    {
-      "id": 1,
-      "name": "Team A",
-      "seed": 1,
-      "region": "Region1",
-      "rating": 30.0
-    },
-    {
-      "id": 2,
-      "name": "Team B",
-      "seed": 16,
-      "region": "Region1",
-      "rating": 10.0
-    },
-    {
-      "id": 3,
-      "name": "Team C",
-      "seed": 8,
-      "region": "Region1",
-      "rating": 20.0
-    },
-    {
-      "id": 4,
-      "name": "Team D",
-      "seed": 9,
-      "region": "Region1",
-      "rating": 19.0
-    }
+    { "id": 1, "name": "Duke", "seed": 1, "region": "East", "rating": 16 },
+    { "id": 2, "name": "Siena", "seed": 16, "region": "East", "rating": 1 },
+    { "id": 3, "name": "Ohio State", "seed": 8, "region": "East", "rating": 9 },
+    { "id": 4, "name": "TCU", "seed": 9, "region": "East", "rating": 8 },
+    { "id": 5, "name": "St. John's", "seed": 5, "region": "East", "rating": 12 },
+    { "id": 6, "name": "Northern Iowa", "seed": 12, "region": "East", "rating": 5 },
+    { "id": 7, "name": "Kansas", "seed": 4, "region": "East", "rating": 13 },
+    { "id": 8, "name": "Cal Baptist", "seed": 13, "region": "East", "rating": 4 },
+    { "id": 9, "name": "Louisville", "seed": 6, "region": "East", "rating": 11 },
+    { "id": 10, "name": "South Florida", "seed": 11, "region": "East", "rating": 6 },
+    { "id": 11, "name": "Michigan State", "seed": 3, "region": "East", "rating": 14 },
+    { "id": 12, "name": "North Dakota State", "seed": 14, "region": "East", "rating": 3 },
+    { "id": 13, "name": "UCLA", "seed": 7, "region": "East", "rating": 10 },
+    { "id": 14, "name": "UCF", "seed": 10, "region": "East", "rating": 7 },
+    { "id": 15, "name": "UConn", "seed": 2, "region": "East", "rating": 15 },
+    { "id": 16, "name": "Furman", "seed": 15, "region": "East", "rating": 2 },
+
+    { "id": 17, "name": "Arizona", "seed": 1, "region": "West", "rating": 16 },
+    { "id": 18, "name": "Long Island", "seed": 16, "region": "West", "rating": 1 },
+    { "id": 19, "name": "Villanova", "seed": 8, "region": "West", "rating": 9 },
+    { "id": 20, "name": "Utah State", "seed": 9, "region": "West", "rating": 8 },
+    { "id": 21, "name": "Wisconsin", "seed": 5, "region": "West", "rating": 12 },
+    { "id": 22, "name": "High Point", "seed": 12, "region": "West", "rating": 5 },
+    { "id": 23, "name": "Arkansas", "seed": 4, "region": "West", "rating": 13 },
+    { "id": 24, "name": "Hawaii", "seed": 13, "region": "West", "rating": 4 },
+    { "id": 25, "name": "BYU", "seed": 6, "region": "West", "rating": 11 },
+    { "id": 26, "name": "NC State", "seed": 11, "region": "West", "rating": 6 },
+    { "id": 27, "name": "Gonzaga", "seed": 3, "region": "West", "rating": 14 },
+    { "id": 28, "name": "Kennesaw State", "seed": 14, "region": "West", "rating": 3 },
+    { "id": 29, "name": "Miami (FL)", "seed": 7, "region": "West", "rating": 10 },
+    { "id": 30, "name": "Missouri", "seed": 10, "region": "West", "rating": 7 },
+    { "id": 31, "name": "Purdue", "seed": 2, "region": "West", "rating": 15 },
+    { "id": 32, "name": "Queens (N.C.)", "seed": 15, "region": "West", "rating": 2 },
+
+    { "id": 33, "name": "Florida", "seed": 1, "region": "South", "rating": 16 },
+    { "id": 34, "name": "Lehigh", "seed": 16, "region": "South", "rating": 1 },
+    { "id": 35, "name": "Clemson", "seed": 8, "region": "South", "rating": 9 },
+    { "id": 36, "name": "Iowa", "seed": 9, "region": "South", "rating": 8 },
+    { "id": 37, "name": "Vanderbilt", "seed": 5, "region": "South", "rating": 12 },
+    { "id": 38, "name": "McNeese", "seed": 12, "region": "South", "rating": 5 },
+    { "id": 39, "name": "Nebraska", "seed": 4, "region": "South", "rating": 13 },
+    { "id": 40, "name": "Troy", "seed": 13, "region": "South", "rating": 4 },
+    { "id": 41, "name": "North Carolina", "seed": 6, "region": "South", "rating": 11 },
+    { "id": 42, "name": "VCU", "seed": 11, "region": "South", "rating": 6 },
+    { "id": 43, "name": "Illinois", "seed": 3, "region": "South", "rating": 14 },
+    { "id": 44, "name": "Penn", "seed": 14, "region": "South", "rating": 3 },
+    { "id": 45, "name": "Saint Mary's", "seed": 7, "region": "South", "rating": 10 },
+    { "id": 46, "name": "Texas A&M", "seed": 10, "region": "South", "rating": 7 },
+    { "id": 47, "name": "Houston", "seed": 2, "region": "South", "rating": 15 },
+    { "id": 48, "name": "Idaho", "seed": 15, "region": "South", "rating": 2 },
+
+    { "id": 49, "name": "Michigan", "seed": 1, "region": "Midwest", "rating": 16 },
+    { "id": 50, "name": "UMBC", "seed": 16, "region": "Midwest", "rating": 1 },
+    { "id": 51, "name": "Georgia", "seed": 8, "region": "Midwest", "rating": 9 },
+    { "id": 52, "name": "Saint Louis", "seed": 9, "region": "Midwest", "rating": 8 },
+    { "id": 53, "name": "Texas Tech", "seed": 5, "region": "Midwest", "rating": 12 },
+    { "id": 54, "name": "Akron", "seed": 12, "region": "Midwest", "rating": 5 },
+    { "id": 55, "name": "Alabama", "seed": 4, "region": "Midwest", "rating": 13 },
+    { "id": 56, "name": "Hofstra", "seed": 13, "region": "Midwest", "rating": 4 },
+    { "id": 57, "name": "Tennessee", "seed": 6, "region": "Midwest", "rating": 11 },
+    { "id": 58, "name": "SMU", "seed": 11, "region": "Midwest", "rating": 6 },
+    { "id": 59, "name": "Virginia", "seed": 3, "region": "Midwest", "rating": 14 },
+    { "id": 60, "name": "Wright State", "seed": 14, "region": "Midwest", "rating": 3 },
+    { "id": 61, "name": "Kentucky", "seed": 7, "region": "Midwest", "rating": 10 },
+    { "id": 62, "name": "Santa Clara", "seed": 10, "region": "Midwest", "rating": 7 },
+    { "id": 63, "name": "Iowa State", "seed": 2, "region": "Midwest", "rating": 15 },
+    { "id": 64, "name": "Tennessee State", "seed": 15, "region": "Midwest", "rating": 2 }
   ],
   "games": [
-    {
-      "round": 1,
-      "region": "Region1",
-      "slot": "R1-G1",
-      "team1_source": "TEAM-1",
-      "team2_source": "TEAM-2"
-    },
-    {
-      "round": 1,
-      "region": "Region1",
-      "slot": "R1-G2",
-      "team1_source": "TEAM-3",
-      "team2_source": "TEAM-4"
-    },
-    {
-      "round": 2,
-      "region": "Region1",
-      "slot": "R2-G1",
-      "team1_source": "WIN-1",
-      "team2_source": "WIN-2"
-    }
+    { "round": 1, "region": "East", "slot": "EAST_R64_G1", "team1_source": "TEAM-1", "team2_source": "TEAM-2" },
+    { "round": 1, "region": "East", "slot": "EAST_R64_G2", "team1_source": "TEAM-3", "team2_source": "TEAM-4" },
+    { "round": 1, "region": "East", "slot": "EAST_R64_G3", "team1_source": "TEAM-5", "team2_source": "TEAM-6" },
+    { "round": 1, "region": "East", "slot": "EAST_R64_G4", "team1_source": "TEAM-7", "team2_source": "TEAM-8" },
+    { "round": 1, "region": "East", "slot": "EAST_R64_G5", "team1_source": "TEAM-9", "team2_source": "TEAM-10" },
+    { "round": 1, "region": "East", "slot": "EAST_R64_G6", "team1_source": "TEAM-11", "team2_source": "TEAM-12" },
+    { "round": 1, "region": "East", "slot": "EAST_R64_G7", "team1_source": "TEAM-13", "team2_source": "TEAM-14" },
+    { "round": 1, "region": "East", "slot": "EAST_R64_G8", "team1_source": "TEAM-15", "team2_source": "TEAM-16" },
+
+    { "round": 1, "region": "West", "slot": "WEST_R64_G1", "team1_source": "TEAM-17", "team2_source": "TEAM-18" },
+    { "round": 1, "region": "West", "slot": "WEST_R64_G2", "team1_source": "TEAM-19", "team2_source": "TEAM-20" },
+    { "round": 1, "region": "West", "slot": "WEST_R64_G3", "team1_source": "TEAM-21", "team2_source": "TEAM-22" },
+    { "round": 1, "region": "West", "slot": "WEST_R64_G4", "team1_source": "TEAM-23", "team2_source": "TEAM-24" },
+    { "round": 1, "region": "West", "slot": "WEST_R64_G5", "team1_source": "TEAM-25", "team2_source": "TEAM-26" },
+    { "round": 1, "region": "West", "slot": "WEST_R64_G6", "team1_source": "TEAM-27", "team2_source": "TEAM-28" },
+    { "round": 1, "region": "West", "slot": "WEST_R64_G7", "team1_source": "TEAM-29", "team2_source": "TEAM-30" },
+    { "round": 1, "region": "West", "slot": "WEST_R64_G8", "team1_source": "TEAM-31", "team2_source": "TEAM-32" },
+
+    { "round": 1, "region": "South", "slot": "SOUTH_R64_G1", "team1_source": "TEAM-33", "team2_source": "TEAM-34" },
+    { "round": 1, "region": "South", "slot": "SOUTH_R64_G2", "team1_source": "TEAM-35", "team2_source": "TEAM-36" },
+    { "round": 1, "region": "South", "slot": "SOUTH_R64_G3", "team1_source": "TEAM-37", "team2_source": "TEAM-38" },
+    { "round": 1, "region": "South", "slot": "SOUTH_R64_G4", "team1_source": "TEAM-39", "team2_source": "TEAM-40" },
+    { "round": 1, "region": "South", "slot": "SOUTH_R64_G5", "team1_source": "TEAM-41", "team2_source": "TEAM-42" },
+    { "round": 1, "region": "South", "slot": "SOUTH_R64_G6", "team1_source": "TEAM-43", "team2_source": "TEAM-44" },
+    { "round": 1, "region": "South", "slot": "SOUTH_R64_G7", "team1_source": "TEAM-45", "team2_source": "TEAM-46" },
+    { "round": 1, "region": "South", "slot": "SOUTH_R64_G8", "team1_source": "TEAM-47", "team2_source": "TEAM-48" },
+
+    { "round": 1, "region": "Midwest", "slot": "MIDWEST_R64_G1", "team1_source": "TEAM-49", "team2_source": "TEAM-50" },
+    { "round": 1, "region": "Midwest", "slot": "MIDWEST_R64_G2", "team1_source": "TEAM-51", "team2_source": "TEAM-52" },
+    { "round": 1, "region": "Midwest", "slot": "MIDWEST_R64_G3", "team1_source": "TEAM-53", "team2_source": "TEAM-54" },
+    { "round": 1, "region": "Midwest", "slot": "MIDWEST_R64_G4", "team1_source": "TEAM-55", "team2_source": "TEAM-56" },
+    { "round": 1, "region": "Midwest", "slot": "MIDWEST_R64_G5", "team1_source": "TEAM-57", "team2_source": "TEAM-58" },
+    { "round": 1, "region": "Midwest", "slot": "MIDWEST_R64_G6", "team1_source": "TEAM-59", "team2_source": "TEAM-60" },
+    { "round": 1, "region": "Midwest", "slot": "MIDWEST_R64_G7", "team1_source": "TEAM-61", "team2_source": "TEAM-62" },
+    { "round": 1, "region": "Midwest", "slot": "MIDWEST_R64_G8", "team1_source": "TEAM-63", "team2_source": "TEAM-64" },
+
+    { "round": 2, "region": "East", "slot": "EAST_R32_G1", "team1_source": "WIN-1", "team2_source": "WIN-2" },
+    { "round": 2, "region": "East", "slot": "EAST_R32_G2", "team1_source": "WIN-3", "team2_source": "WIN-4" },
+    { "round": 2, "region": "East", "slot": "EAST_R32_G3", "team1_source": "WIN-5", "team2_source": "WIN-6" },
+    { "round": 2, "region": "East", "slot": "EAST_R32_G4", "team1_source": "WIN-7", "team2_source": "WIN-8" },
+
+    { "round": 2, "region": "West", "slot": "WEST_R32_G1", "team1_source": "WIN-9", "team2_source": "WIN-10" },
+    { "round": 2, "region": "West", "slot": "WEST_R32_G2", "team1_source": "WIN-11", "team2_source": "WIN-12" },
+    { "round": 2, "region": "West", "slot": "WEST_R32_G3", "team1_source": "WIN-13", "team2_source": "WIN-14" },
+    { "round": 2, "region": "West", "slot": "WEST_R32_G4", "team1_source": "WIN-15", "team2_source": "WIN-16" },
+
+    { "round": 2, "region": "South", "slot": "SOUTH_R32_G1", "team1_source": "WIN-17", "team2_source": "WIN-18" },
+    { "round": 2, "region": "South", "slot": "SOUTH_R32_G2", "team1_source": "WIN-19", "team2_source": "WIN-20" },
+    { "round": 2, "region": "South", "slot": "SOUTH_R32_G3", "team1_source": "WIN-21", "team2_source": "WIN-22" },
+    { "round": 2, "region": "South", "slot": "SOUTH_R32_G4", "team1_source": "WIN-23", "team2_source": "WIN-24" },
+
+    { "round": 2, "region": "Midwest", "slot": "MIDWEST_R32_G1", "team1_source": "WIN-25", "team2_source": "WIN-26" },
+    { "round": 2, "region": "Midwest", "slot": "MIDWEST_R32_G2", "team1_source": "WIN-27", "team2_source": "WIN-28" },
+    { "round": 2, "region": "Midwest", "slot": "MIDWEST_R32_G3", "team1_source": "WIN-29", "team2_source": "WIN-30" },
+    { "round": 2, "region": "Midwest", "slot": "MIDWEST_R32_G4", "team1_source": "WIN-31", "team2_source": "WIN-32" },
+
+    { "round": 3, "region": "East", "slot": "EAST_S16_G1", "team1_source": "WIN-33", "team2_source": "WIN-34" },
+    { "round": 3, "region": "East", "slot": "EAST_S16_G2", "team1_source": "WIN-35", "team2_source": "WIN-36" },
+
+    { "round": 3, "region": "West", "slot": "WEST_S16_G1", "team1_source": "WIN-37", "team2_source": "WIN-38" },
+    { "round": 3, "region": "West", "slot": "WEST_S16_G2", "team1_source": "WIN-39", "team2_source": "WIN-40" },
+
+    { "round": 3, "region": "South", "slot": "SOUTH_S16_G1", "team1_source": "WIN-41", "team2_source": "WIN-42" },
+    { "round": 3, "region": "South", "slot": "SOUTH_S16_G2", "team1_source": "WIN-43", "team2_source": "WIN-44" },
+
+    { "round": 3, "region": "Midwest", "slot": "MIDWEST_S16_G1", "team1_source": "WIN-45", "team2_source": "WIN-46" },
+    { "round": 3, "region": "Midwest", "slot": "MIDWEST_S16_G2", "team1_source": "WIN-47", "team2_source": "WIN-48" },
+
+    { "round": 4, "region": "East", "slot": "EAST_E8", "team1_source": "WIN-49", "team2_source": "WIN-50" },
+    { "round": 4, "region": "West", "slot": "WEST_E8", "team1_source": "WIN-51", "team2_source": "WIN-52" },
+    { "round": 4, "region": "South", "slot": "SOUTH_E8", "team1_source": "WIN-53", "team2_source": "WIN-54" },
+    { "round": 4, "region": "Midwest", "slot": "MIDWEST_E8", "team1_source": "WIN-55", "team2_source": "WIN-56" },
+
+    { "round": 5, "region": null, "slot": "FF_SEMI_1", "team1_source": "WIN-57", "team2_source": "WIN-58" },
+    { "round": 5, "region": null, "slot": "FF_SEMI_2", "team1_source": "WIN-59", "team2_source": "WIN-60" },
+
+    { "round": 6, "region": null, "slot": "NATIONAL_CHAMPIONSHIP", "team1_source": "WIN-61", "team2_source": "WIN-62" }
   ]
 }
-
