@@ -83,7 +83,7 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
         (2, 15): 0.935,
         (3, 14): 0.855,
         (4, 13): 0.790,
-        (5, 12): 0.670,
+        (5, 12): 0.650,
         (6, 11): 0.620,
         (7, 10): 0.605,
         (8, 9):  0.505,
@@ -118,22 +118,22 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
 
     # KenPom model weight (logit blend) by round
     ALPHA_BY_ROUND = {
-        1: 0.50,
-        2: 0.65,
-        3: 0.80,
-        4: 0.88,
-        5: 0.92,
-        6: 0.94
+        1: 0.48,
+        2: 0.60,
+        3: 0.74,
+        4: 0.82,
+        5: 0.88,
+        6: 0.90,
     }
 
     # Round-dependent KenPom logistic scale (later rounds more deterministic)
     SCALE_BY_ROUND = {
-        1: 4.8,
-        2: 4.7,
-        3: 4.6,
+        1: 5.4,
+        2: 5.0,
+        3: 4.7,
         4: 4.5,
         5: 4.4,
-        6: 4.3
+        6: 4.3,
     }
 
     # Round-dependent temperature
@@ -143,7 +143,7 @@ def win_probability(team_a: Team, team_b: Team, round_num: int = 1) -> float:
         3: 0.96,
         4: 0.92,
         5: 0.90,
-        6: 0.88
+        6: 0.88,
     }
 
     # Extreme R64 upset caps (max underdog win probability)
@@ -294,11 +294,26 @@ def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
     winners_by_key: Dict[str, int] = {}
     picks: list[BracketPick] = []
 
+    import random
+
+    ...
+    winners_by_key: Dict[str, int] = {}
+    picks: list[BracketPick] = []
+
+    # region+round chaos: one shock per (round, region)
+    region_round_noise: Dict[tuple[int, str | None], float] = {}
+
     for game in games:
+        key = (game.round, game.region)
+        if key not in region_round_noise:
+            # 0.35 std dev is what you suggested
+            region_round_noise[key] = random.gauss(0.0, 0.35)
+        noise = region_round_noise[key]
+
         team1 = _resolve_team(game.team1_source, teams, winners_by_key)
         team2 = _resolve_team(game.team2_source, teams, winners_by_key)
 
-        p = win_probability(team1, team2, round_num=game.round)
+        p = win_probability(team1, team2, round_num=game.round, region_noise=noise)
         if random.random() < p:
             winner = team1
         else:
