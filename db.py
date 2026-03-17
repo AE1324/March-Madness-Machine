@@ -8,7 +8,9 @@ class Base(DeclarativeBase):
 
 # Default to a local SQLite database. You can change this to a PostgreSQL URL
 # like "postgresql+psycopg2://user:password@localhost:5432/brackets"
-DATABASE_URL = "postgresql+psycopg2://postgres:postgres@localhost:5432/brackets"
+import os
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///brackets.db")
+
 
 
 engine = create_engine(DATABASE_URL, echo=False, future=True)
