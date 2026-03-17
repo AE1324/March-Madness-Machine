@@ -259,6 +259,52 @@ with tab_stats:
 
     st.dataframe(rows, use_container_width=True)
     st.caption("Update via Admin → Recompute pick percentages.")
+
+
+    st.subheader("Brackets at risk (perfect brackets only, precomputed)")
+
+    engine = get_engine()
+    with Session(engine) as session:
+        from sqlalchemy import text
+        rows = session.execute(
+            text("""
+            SELECT
+                'R' || bar.round || ' ' || COALESCE(bar.region, 'FF') || ' ' || bar.slot AS game,
+                t.seed,
+                t.name AS team_name,
+                bar.brackets_needing,
+                bar.pct_among_perfect,
+                bar.round,
+                bar.region,
+                bar.slot
+            FROM brackets_at_risk bar
+            JOIN teams t ON t.id = bar.team_id
+            ORDER BY
+                bar.round,
+                bar.region NULLS LAST,
+                bar.slot,
+                t.seed;  -- ensures exactly 2 rows per game, in seed order
+            """)
+        ).mappings().all()
+
+    if rows:
+        st.dataframe(
+            rows,
+            use_container_width=True,
+            column_order=[
+                "game",
+                "team_name",
+                "seed",
+                "brackets_needing",
+                "pct_among_perfect",
+                "round",
+                "region",
+                "slot",
+            ],
+        )
+        st.caption("Updated via Admin → Recompute pick percentages and brackets at risk.")
+    else:
+        st.info("No data yet. Use Admin to recompute stats.")
     
 
 with tab_admin:
@@ -285,11 +331,12 @@ with tab_admin:
 
     
     st.subheader("Pick stats")
-
-    if st.button("Recompute pick percentages (all brackets)"):
+    
+    if st.button("Recompute pick percentages and brackets at risk (all brackets)"):
         engine = get_engine()
         from sqlalchemy import text
         with engine.begin() as conn:
+            # Recompute pick_stats
             conn.execute(text("TRUNCATE TABLE pick_stats;"))
             conn.execute(text("""
             INSERT INTO pick_stats (round, team_id, picks, pct)
@@ -312,7 +359,77 @@ with tab_admin:
               r.picks / nullif((SELECT n FROM n), 0)
             FROM raw r;
             """))
-        st.success("Pick stats recomputed.")
+            # Recompute brackets_at_risk
+            conn.execute(text("TRUNCATE TABLE brackets_at_risk;"))
+            conn.execute(text("""
+            INSERT INTO brackets_at_risk (
+              round, region, slot, team_id, brackets_needing, pct_among_perfect
+            )
+            WITH played AS (
+              SELECT game_id, winner_team_id
+              FROM real_results
+              WHERE winner_team_id IS NOT NULL
+            ),
+            wrong AS (
+              SELECT bp.bracket_id
+              FROM bracket_picks bp
+              JOIN played p ON p.game_id = bp.game_id
+              WHERE bp.predicted_winner_team_id <> p.winner_team_id
+              GROUP BY bp.bracket_id
+            ),
+            perfect AS (
+              SELECT b.id AS bracket_id
+              FROM brackets b
+              WHERE NOT EXISTS (
+                SELECT 1
+                FROM wrong w
+                WHERE w.bracket_id = b.id
+              )
+            ),
+            future_games AS (
+              SELECT g.id, g.round, g.region, g.slot
+              FROM tournament_games g
+              LEFT JOIN real_results r ON r.game_id = g.id
+              WHERE r.game_id IS NULL
+            ),
+            picks AS (
+              SELECT
+                fg.id AS game_id,
+                fg.round,
+                fg.region,
+                fg.slot,
+                bp.predicted_winner_team_id AS team_id
+              FROM future_games fg
+              JOIN bracket_picks bp ON bp.game_id = fg.id
+              JOIN perfect pf ON pf.bracket_id = bp.bracket_id
+            ),
+            by_team AS (
+              SELECT
+                p.game_id,
+                p.round,
+                p.region,
+                p.slot,
+                p.team_id,
+                COUNT(*)::float AS cnt
+              FROM picks p
+              GROUP BY p.game_id, p.round, p.region, p.slot, p.team_id
+            ),
+            total AS (
+              SELECT game_id, SUM(cnt) AS total_cnt
+              FROM by_team
+              GROUP BY game_id
+            )
+            SELECT
+              bt.round,
+              bt.region,
+              bt.slot,
+              bt.team_id,
+              bt.cnt::bigint AS brackets_needing,
+              (bt.cnt / NULLIF(tot.total_cnt,0)) AS pct_among_perfect
+            FROM by_team bt
+            JOIN total tot ON tot.game_id = bt.game_id;
+            """))
+        st.success("Pick stats and brackets-at-risk recomputed.")
 
 with col_left:
     st.subheader("Generate brackets")
