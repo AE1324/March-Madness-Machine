@@ -12,6 +12,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, Mapped, mapped_column
 
 from db import Base
+from sqlalchemy import JSON 
 
 
 class Team(Base):
@@ -22,6 +23,16 @@ class Team(Base):
     seed: Mapped[int] = mapped_column(Integer, nullable=False)
     region: Mapped[str] = mapped_column(String, nullable=False)
     rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kenpom: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    adj_em: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adj_o: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adj_d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    adj_tempo: Mapped[float | None] = mapped_column(Float, nullable=True)
+    luck: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sos_adj_em: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sos_adj_o: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sos_adj_d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ncsos_adj_em: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     def __repr__(self) -> str:  # pragma: no cover - debug helper
         return f"<Team id={self.id} name={self.name!r} seed={self.seed} region={self.region!r}>"
