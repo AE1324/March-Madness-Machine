@@ -173,6 +173,23 @@ def _ensure_derived_tables_exist(engine) -> None:
                 """
             )
         )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS game_survival (
+                    game_index INTEGER NOT NULL,
+                    game_id INTEGER NOT NULL,
+                    round INTEGER NOT NULL,
+                    region TEXT,
+                    slot TEXT NOT NULL,
+                    alive_brackets BIGINT NOT NULL,
+                    died_at_index BIGINT NOT NULL,
+                    alive_pct DOUBLE PRECISION NOT NULL,
+                    PRIMARY KEY (game_index)
+                );
+                """
+            )
+        )
 
 
 def recompute_pick_stats_and_brackets_at_risk(engine) -> None:
@@ -293,6 +310,160 @@ def recompute_pick_stats_and_brackets_at_risk(engine) -> None:
                 )
 
 
+def recompute_game_survival(engine) -> None:
+    """
+    Precompute cumulative alive perfect-bracket counts after each simulated game index.
+
+    Definition:
+    - game_index corresponds to bit position i in `brackets.result_bits`
+      (games ordered by (round, id)).
+    - A bracket "dies" at the earliest game_index among games with entered real results
+      where its predicted winner != real winner.
+    - alive_brackets at game_index i counts brackets that survive through i.
+    """
+    _ensure_derived_tables_exist(engine)
+
+    with Session(engine) as session:
+        games = (
+            session.query(TournamentGame)
+            .order_by(TournamentGame.round.asc(), TournamentGame.id.asc())
+            .all()
+        )
+        if not games:
+            raise RuntimeError("No tournament games found. Load the bracket first.")
+
+        game_index_by_id = {g.id: i for i, g in enumerate(games)}
+        num_games = len(games)
+
+        total_q = session.query(Bracket.id).filter(Bracket.result_bits.isnot(None))
+        total_brackets = total_q.count()
+
+        if total_brackets == 0:
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM game_survival;"))
+            return
+
+        played_rows = session.query(RealResult.game_id, RealResult.winner_team_id).all()
+        played_winner_by_game_id = {
+            gid: wid for gid, wid in played_rows if wid is not None
+        }
+
+        if not played_winner_by_game_id:
+            # No real results entered yet => everything survives.
+            rows = []
+            for i, g in enumerate(games):
+                rows.append(
+                    {
+                        "game_index": i,
+                        "game_id": g.id,
+                        "round": g.round,
+                        "region": g.region,
+                        "slot": g.slot,
+                        "alive_brackets": total_brackets,
+                        "died_at_index": 0,
+                        "alive_pct": 1.0,
+                    }
+                )
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM game_survival;"))
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO game_survival (
+                            game_index, game_id, round, region, slot,
+                            alive_brackets, died_at_index, alive_pct
+                        ) VALUES (
+                            :game_index, :game_id, :round, :region, :slot,
+                            :alive_brackets, :died_at_index, :alive_pct
+                        )
+                        """
+                    ),
+                    rows,
+                )
+            return
+
+        max_played_idx = max(game_index_by_id[gid] for gid in played_winner_by_game_id)
+
+        # died_at_index[i] = number of brackets that die at game index i.
+        died_at_index = [0] * num_games
+
+        bracket_q = session.query(Bracket.result_bits).filter(
+            Bracket.result_bits.isnot(None)
+        )
+
+        # Fast decode loop: stop once we pass max_played_idx, and stop immediately
+        # once a bracket is known to have died (first mismatch).
+        for (bits,) in bracket_q.yield_per(2000):
+            assert bits is not None
+            bits_int = int(bits)
+            winners_by_key: dict[str, int] = {}
+            death_step: int | None = None
+
+            for i, g in enumerate(games):
+                if i > max_played_idx:
+                    break
+
+                def resolve_source(src: str) -> int:
+                    if src.startswith("TEAM-"):
+                        return int(src.split("-", 1)[1])
+                    if src.startswith("WIN-"):
+                        upstream_gid = int(src.split("-", 1)[1])
+                        return winners_by_key[f"WIN-{upstream_gid}"]
+                    raise ValueError(f"Unknown team source: {src}")
+
+                t1_id = resolve_source(g.team1_source)
+                t2_id = resolve_source(g.team2_source)
+
+                team1_won = ((bits_int >> i) & 1) == 1
+                winner_id = t1_id if team1_won else t2_id
+
+                actual_winner = played_winner_by_game_id.get(g.id)
+                if actual_winner is not None and winner_id != actual_winner:
+                    death_step = i
+                    break
+
+                winners_by_key[f"WIN-{g.id}"] = winner_id
+
+            if death_step is not None:
+                died_at_index[death_step] += 1
+
+        # Convert died counts to alive counts by prefix sum.
+        died_prefix = 0
+        rows: list[dict[str, object]] = []
+        for i, g in enumerate(games):
+            died_prefix += died_at_index[i]
+            alive = total_brackets - died_prefix
+            rows.append(
+                {
+                    "game_index": i,
+                    "game_id": g.id,
+                    "round": g.round,
+                    "region": g.region,
+                    "slot": g.slot,
+                    "alive_brackets": alive,
+                    "died_at_index": died_at_index[i],
+                    "alive_pct": alive / float(total_brackets),
+                }
+            )
+
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM game_survival;"))
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO game_survival (
+                        game_index, game_id, round, region, slot,
+                        alive_brackets, died_at_index, alive_pct
+                    ) VALUES (
+                        :game_index, :game_id, :round, :region, :slot,
+                        :alive_brackets, :died_at_index, :alive_pct
+                    )
+                    """
+                ),
+                rows,
+            )
+
+
 # --- Streamlit UI ---
 
 st.set_page_config(page_title="Bracket Simulator", layout="wide")
@@ -392,6 +563,41 @@ with tab_stats:
     engine = get_engine()
     with Session(engine) as session:
         st.metric("Perfect brackets remaining", count_perfect_brackets(session))
+
+    # Survival curve based on packed results + entered real results.
+    engine = get_engine()
+    with Session(engine) as session:
+        from sqlalchemy import text as _text
+
+        rows = session.execute(
+            _text(
+                """
+                SELECT game_index, alive_brackets, alive_pct
+                FROM game_survival
+                ORDER BY game_index ASC;
+                """
+            )
+        ).mappings().all()
+
+    if rows:
+        st.subheader("Perfect bracket survival (by game index)")
+        if rows:
+            st.metric(
+                "Survival after all 63 games",
+                f"{rows[-1]['alive_pct']*100:.4f}%",
+            )
+        st.line_chart(
+            {
+                "alive_brackets": [r["alive_brackets"] for r in rows],
+                "alive_pct": [r["alive_pct"] for r in rows],
+            }
+        )
+    else:
+        st.info(
+            "No `game_survival` data yet. Click Admin → "
+            "“Recompute pick percentages and brackets at risk (all brackets)” "
+            "to generate the survival curve."
+        )
 
         st.subheader("Leaderboard (most correct picks so far)")
         st.dataframe(leaderboard(session, limit=50), use_container_width=True)
@@ -499,6 +705,8 @@ with tab_admin:
         engine = get_engine()
         with st.spinner("Recomputing pick stats from packed bracket outcomes..."):
             recompute_pick_stats_and_brackets_at_risk(engine)
+        with st.spinner("Recomputing perfect-bracket survival by game index..."):
+            recompute_game_survival(engine)
         st.success("Pick stats and brackets-at-risk recomputed.")
 
 with col_left:
