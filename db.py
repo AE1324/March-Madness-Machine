@@ -37,10 +37,26 @@ def init_db() -> None:
             existing_cols = {c["name"] for c in insp.get_columns("brackets")}
             if "result_bits" not in existing_cols:
                 conn.execute(text("ALTER TABLE brackets ADD COLUMN result_bits BIGINT"))
+            if "survival_index" not in existing_cols:
+                conn.execute(
+                    text("ALTER TABLE brackets ADD COLUMN survival_index INTEGER")
+                )
+                # Initialize legacy rows (if any) to "alive through all games".
+                conn.execute(
+                    text("UPDATE brackets SET survival_index = 63 WHERE survival_index IS NULL")
+                )
             if "champion_team_id" not in existing_cols:
                 conn.execute(
                     text("ALTER TABLE brackets ADD COLUMN champion_team_id INTEGER")
                 )
+
+        # Postgres-only performance indexes for survival updates.
+        if getattr(engine.dialect, "name", "") == "postgresql":
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_survival_active ON brackets (survival_index) WHERE survival_index >= 0"
+                )
+            )
 
         # Teams: KenPom JSON and derived numeric columns.
         if "teams" in insp.get_table_names():

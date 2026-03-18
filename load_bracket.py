@@ -75,10 +75,18 @@ def load_bracket_from_json(session: Session, json_path: str) -> None:
             )
         )
 
+    # IMPORTANT:
+    # `MM_2026.json` encodes upstream winners as "WIN-<game_id>" where the <game_id>
+    # is the numeric ID referenced by the JSON game graph.
+    #
+    # To make "WIN-1", "WIN-2", ... resolve correctly, we must ensure that the
+    # database primary keys `tournament_games.id` match that JSON numbering.
+    # We do that by assigning explicit IDs based on the games array position.
     games: list[TournamentGame] = []
-    for g in games_data:
+    for idx, g in enumerate(games_data, start=1):
         games.append(
             TournamentGame(
+                id=idx,
                 round=g["round"],
                 region=g.get("region"),
                 slot=g["slot"],
