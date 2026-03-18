@@ -74,9 +74,18 @@ class Bracket(Base):
     model_version: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Packed bracket outcomes (63 games for a 64-team tournament).
-    # Bit i corresponds to the i'th game in TournamentGame ordered by (round, id).
+    # Bit i corresponds to the game_index (0..62) defined by `TournamentGame.slot`
+    # in `MM_2026.json` order (R64, R32, S16, E8, Final Four, Championship).
     # Bit value 1 => team1_source won that game; 0 => team2_source won.
     result_bits: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+
+    # Survival tracking:
+    # - Initialized to 63 for every bracket (means "still alive after all 63 games")
+    # - When a real game k is entered and a bracket's bit != true_bit,
+    #   set survival_index := min(survival_index, k-1).
+    # - A bracket is alive at game_index i iff survival_index >= i.
+    survival_index: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+
     champion_team_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("teams.id"), nullable=True, index=True
     )

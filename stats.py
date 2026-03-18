@@ -27,25 +27,67 @@ def _load_simulation_context(session: Session):
 
 
 def count_perfect_brackets(session: Session) -> int:
-    teams_by_id, games, played_winner_by_game_id, bracket_q = _load_simulation_context(session)
+    # Fast path using survival_index:
+    # A bracket is "perfect" vs entered real results iff it survived through
+    # the maximum entered game bit index.
+    from sqlalchemy import func
+    import re
 
-    # If no results have been entered yet, all brackets are perfect.
-    if not played_winner_by_game_id:
-        return int(bracket_q.count())
+    played_game_rows = (
+        session.query(RealResult.game_id, RealResult.winner_team_id)
+        .filter(RealResult.winner_team_id.isnot(None))
+        .all()
+    )
 
-    perfect = 0
-    for _, bits in bracket_q.yield_per(2000):
-        assert bits is not None
-        winners_by_game_id = decode_bracket_winners(int(bits), games, teams_by_id)
-        is_perfect = True
-        for gid, actual_winner_tid in played_winner_by_game_id.items():
-            if winners_by_game_id.get(gid) != actual_winner_tid:
-                is_perfect = False
-                break
-        if is_perfect:
-            perfect += 1
+    total = (
+        session.query(Bracket.id)
+        .filter(Bracket.result_bits.isnot(None))
+        .count()
+    )
+    if total == 0:
+        return 0
 
-    return perfect
+    if not played_game_rows:
+        return int(total)
+
+    region_order = {"EAST": 0, "WEST": 1, "SOUTH": 2, "MIDWEST": 3}
+
+    def bit_index_for_slot(slot: str) -> int:
+        m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_R64_G(\d+)$", slot)
+        if m:
+            return 0 + region_order[m.group(1)] * 8 + (int(m.group(2)) - 1)
+        m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_R32_G(\d+)$", slot)
+        if m:
+            return 32 + region_order[m.group(1)] * 4 + (int(m.group(2)) - 1)
+        m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_S16_G(\d+)$", slot)
+        if m:
+            return 48 + region_order[m.group(1)] * 2 + (int(m.group(2)) - 1)
+        m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_E8$", slot)
+        if m:
+            return 56 + region_order[m.group(1)]
+        if slot == "FF_SEMI_1":
+            return 60
+        if slot == "FF_SEMI_2":
+            return 61
+        if slot == "NATIONAL_CHAMPIONSHIP":
+            return 62
+        raise ValueError(f"Unrecognized slot: {slot}")
+
+    played_game_ids = [gid for gid, _ in played_game_rows]
+    slots = (
+        session.query(TournamentGame.id, TournamentGame.slot)
+        .filter(TournamentGame.id.in_(played_game_ids))
+        .all()
+    )
+    max_k = max(bit_index_for_slot(s.slot) for s in slots)
+
+    # Survived through max_k <=> survival_index >= max_k.
+    return int(
+        session.query(func.count(Bracket.id))
+        .filter(Bracket.result_bits.isnot(None))
+        .filter(Bracket.survival_index >= max_k)
+        .scalar_one()
+    )
 
 
 def leaderboard(session: Session, limit: int = 25):

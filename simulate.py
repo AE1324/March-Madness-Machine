@@ -4,6 +4,7 @@ import math
 import random
 from datetime import datetime
 import io
+import re
 from typing import Callable, Dict, NamedTuple
 
 from sqlalchemy.orm import Session
@@ -411,14 +412,55 @@ def _resolve_team(source: str, teams_by_id: Dict[int, Team], winners_by_key: Dic
     raise ValueError(f"Unknown team source format: {source}")
 
 def _get_ordered_games(session: Session) -> list[TournamentGame]:
-    games = (
-        session.query(TournamentGame)
-        .order_by(TournamentGame.round.asc(), TournamentGame.id.asc())
-        .all()
-    )
+    games = session.query(TournamentGame).all()
     if not games:
         raise RuntimeError("No tournament games found. Load a bracket first.")
-    return games
+
+    # TournamentGame.slot encodes region as uppercase: EAST/WEST/SOUTH/MIDWEST.
+    region_order: dict[str, int] = {"EAST": 0, "WEST": 1, "SOUTH": 2, "MIDWEST": 3}
+
+    def bit_index_for_game(g: TournamentGame) -> int:
+        slot = g.slot or ""
+        # R64: EAST_R64_G1..EAST_R64_G8 etc.
+        m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_R64_G(\d+)$", slot)
+        if m:
+            reg = m.group(1)
+            num = int(m.group(2))
+            return 0 + region_order[reg] * 8 + (num - 1)
+
+        m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_R32_G(\d+)$", slot)
+        if m:
+            reg = m.group(1)
+            num = int(m.group(2))
+            return 32 + region_order[reg] * 4 + (num - 1)
+
+        m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_S16_G(\d+)$", slot)
+        if m:
+            reg = m.group(1)
+            num = int(m.group(2))
+            return 48 + region_order[reg] * 2 + (num - 1)
+
+        m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_E8$", slot)
+        if m:
+            reg = m.group(1)
+            return 56 + region_order[reg]
+
+        if slot == "FF_SEMI_1":
+            return 60
+        if slot == "FF_SEMI_2":
+            return 61
+        if slot == "NATIONAL_CHAMPIONSHIP":
+            return 62
+
+        raise ValueError(f"Unrecognized game slot format for bit order: {slot}")
+
+    games_sorted = sorted(games, key=bit_index_for_game)
+    indices = [bit_index_for_game(g) for g in games_sorted]
+    if len(indices) != 63:
+        raise ValueError(f"Expected 63 tournament games, got {len(indices)}")
+    if sorted(indices) != list(range(63)):
+        raise ValueError("Tournament game slots do not map to a contiguous 0..62 bit order")
+    return games_sorted
 
 
 def _build_team_fast(teams_by_id: Dict[int, Team]) -> _TeamFast:
@@ -626,6 +668,7 @@ def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
         model_version=model_version,
         result_bits=result_bits,
         champion_team_id=champion_team_id,
+        survival_index=len(games),
         created_at=datetime.utcnow(),
     )
     session.add(bracket)
@@ -653,6 +696,7 @@ def generate_brackets(
     games = _get_ordered_games(session)
     team_fast = _build_team_fast(teams_by_id)
     game_specs, num_noise_keys = _build_game_specs(games)
+    survival_initial = len(game_specs)  # e.g. 63 means "alive after all games"
 
     remaining = n
     generated = 0
@@ -678,7 +722,7 @@ def generate_brackets(
                     team_fast, game_specs, num_noise_keys
                 )
                 lines.append(
-                    f"{created_at_str},\"{mv}\",{result_bits},{champion_team_id}\n"
+                    f"{created_at_str},\"{mv}\",{result_bits},{champion_team_id},{survival_initial}\n"
                 )
             csv_data = "".join(lines)
 
@@ -686,7 +730,7 @@ def generate_brackets(
             raw_conn = sa_conn.connection
             with raw_conn.cursor() as cur:
                 cur.copy_expert(
-                    "COPY brackets (created_at, model_version, result_bits, champion_team_id) FROM STDIN WITH (FORMAT csv)",
+                    "COPY brackets (created_at, model_version, result_bits, champion_team_id, survival_index) FROM STDIN WITH (FORMAT csv)",
                     io.StringIO(csv_data),
                 )
         else:
@@ -701,6 +745,7 @@ def generate_brackets(
                         "model_version": model_version,
                         "result_bits": result_bits,
                         "champion_team_id": champion_team_id,
+                        "survival_index": survival_initial,
                     }
                 )
             session.bulk_insert_mappings(Bracket, mappings)

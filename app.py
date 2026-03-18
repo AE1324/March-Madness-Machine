@@ -1,4 +1,5 @@
 import os
+import re
 from io import StringIO
 
 import zipfile
@@ -310,62 +311,182 @@ def recompute_pick_stats_and_brackets_at_risk(engine) -> None:
                 )
 
 
-def recompute_game_survival(engine) -> None:
+def _bit_index_for_slot(slot: str) -> int:
     """
-    Precompute cumulative alive perfect-bracket counts after each simulated game index.
+    Map TournamentGame.slot (from `MM_2026.json`) into the packed `result_bits` bit index:
+    0-31: R64, 32-47: R32, 48-55: S16, 56-59: E8, 60-61: Final Four, 62: Championship.
+    """
+    region_order = {"EAST": 0, "WEST": 1, "SOUTH": 2, "MIDWEST": 3}
 
-    Definition:
-    - game_index corresponds to bit position i in `brackets.result_bits`
-      (games ordered by (round, id)).
-    - A bracket "dies" at the earliest game_index among games with entered real results
-      where its predicted winner != real winner.
-    - alive_brackets at game_index i counts brackets that survive through i.
+    m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_R64_G(\d+)$", slot)
+    if m:
+        reg = m.group(1)
+        num = int(m.group(2))
+        return 0 + region_order[reg] * 8 + (num - 1)
+
+    m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_R32_G(\d+)$", slot)
+    if m:
+        reg = m.group(1)
+        num = int(m.group(2))
+        return 32 + region_order[reg] * 4 + (num - 1)
+
+    m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_S16_G(\d+)$", slot)
+    if m:
+        reg = m.group(1)
+        num = int(m.group(2))
+        return 48 + region_order[reg] * 2 + (num - 1)
+
+    m = re.match(r"^(EAST|WEST|SOUTH|MIDWEST)_E8$", slot)
+    if m:
+        reg = m.group(1)
+        return 56 + region_order[reg]
+
+    if slot == "FF_SEMI_1":
+        return 60
+    if slot == "FF_SEMI_2":
+        return 61
+    if slot == "NATIONAL_CHAMPIONSHIP":
+        return 62
+
+    raise ValueError(f"Unrecognized slot for bit order: {slot}")
+
+
+def _ordered_games_by_bit_index(session: Session) -> list[TournamentGame]:
+    games = session.query(TournamentGame).all()
+    if not games:
+        raise RuntimeError("No tournament games found. Load the bracket first.")
+
+    games_sorted = sorted(games, key=lambda g: _bit_index_for_slot(g.slot))
+    indices = [_bit_index_for_slot(g.slot) for g in games_sorted]
+
+    if len(indices) != 63 or sorted(indices) != list(range(63)):
+        raise RuntimeError("TournamentGame slots do not map to a contiguous 0..62 bit index.")
+    return games_sorted
+
+
+def _apply_survival_update_for_game(
+    session: Session,
+    *,
+    game_index: int,
+    true_bit: int,
+) -> None:
+    """
+    One-step scalable elimination update for game bit index `game_index`.
+    Sets survival_index := min(survival_index, game_index - 1) for incorrect brackets.
+    """
+    # Clamp: first game index (0) kills to -1.
+    new_survival = game_index - 1
+    session.execute(
+        text(
+            """
+            UPDATE brackets
+            SET survival_index = LEAST(survival_index, :new_survival)
+            WHERE survival_index >= :game_index
+              AND ((result_bits >> :game_index) & 1) != :true_bit;
+            """
+        ),
+        {"new_survival": new_survival, "game_index": game_index, "true_bit": true_bit},
+    )
+
+
+def rebuild_survival_from_real_results(engine) -> None:
+    """
+    Reset survival_index and re-apply elimination updates in official bit order,
+    using all currently-entered `real_results`.
     """
     _ensure_derived_tables_exist(engine)
 
     with Session(engine) as session:
-        games = (
-            session.query(TournamentGame)
-            .order_by(TournamentGame.round.asc(), TournamentGame.id.asc())
-            .all()
+        games_sorted = _ordered_games_by_bit_index(session)
+
+        played = session.query(RealResult.game_id, RealResult.winner_team_id).all()
+        winners_by_game_id = {gid: wid for gid, wid in played if wid is not None}
+
+        # Reset all brackets to "alive" (survival_index = 63).
+        session.execute(text("UPDATE brackets SET survival_index = 63;"))
+        session.flush()
+
+        for g in games_sorted:
+            actual_winner_tid = winners_by_game_id.get(g.id)
+            if actual_winner_tid is None:
+                continue
+
+            # Resolve the team that was on the TEAM-A side for this game,
+            # using actual upstream winners.
+            def resolve_team_id(source: str) -> int | None:
+                if source.startswith("TEAM-"):
+                    return int(source.split("-", 1)[1])
+                if source.startswith("WIN-"):
+                    upstream_gid = int(source.split("-", 1)[1])
+                    return winners_by_game_id.get(upstream_gid)
+                return None
+
+            team1_tid = resolve_team_id(g.team1_source)
+            if team1_tid is None:
+                continue
+
+            true_bit = 1 if actual_winner_tid == team1_tid else 0
+            k = _bit_index_for_slot(g.slot)
+            _apply_survival_update_for_game(session, game_index=k, true_bit=true_bit)
+
+        session.commit()
+
+
+def rebuild_game_survival_from_survival_index(engine) -> None:
+    """
+    Populate `game_survival` from `brackets.survival_index` distribution.
+    No decoding of `result_bits` required.
+    """
+    _ensure_derived_tables_exist(engine)
+
+    with Session(engine) as session:
+        games_sorted = _ordered_games_by_bit_index(session)
+
+        from sqlalchemy import func
+
+        total = (
+            session.query(Bracket.id)
+            .filter(Bracket.result_bits.isnot(None))
+            .count()
         )
-        if not games:
-            raise RuntimeError("No tournament games found. Load the bracket first.")
-
-        game_index_by_id = {g.id: i for i, g in enumerate(games)}
-        num_games = len(games)
-
-        total_q = session.query(Bracket.id).filter(Bracket.result_bits.isnot(None))
-        total_brackets = total_q.count()
-
-        if total_brackets == 0:
+        if total == 0:
             with engine.begin() as conn:
                 conn.execute(text("DELETE FROM game_survival;"))
             return
 
-        played_rows = session.query(RealResult.game_id, RealResult.winner_team_id).all()
-        played_winner_by_game_id = {
-            gid: wid for gid, wid in played_rows if wid is not None
-        }
+        dist = (
+            session.query(Bracket.survival_index, func.count(Bracket.id))
+            .filter(Bracket.result_bits.isnot(None))
+            .group_by(Bracket.survival_index)
+            .all()
+        )
+        count_map = {int(si): int(cnt) for si, cnt in dist}
 
-        if not played_winner_by_game_id:
-            # No real results entered yet => everything survives.
-            rows = []
-            for i, g in enumerate(games):
-                rows.append(
-                    {
-                        "game_index": i,
-                        "game_id": g.id,
-                        "round": g.round,
-                        "region": g.region,
-                        "slot": g.slot,
-                        "alive_brackets": total_brackets,
-                        "died_at_index": 0,
-                        "alive_pct": 1.0,
-                    }
-                )
-            with engine.begin() as conn:
-                conn.execute(text("DELETE FROM game_survival;"))
+        # died_at_index[i] = number of brackets dying at game_index i
+        # which corresponds to survival_index == (i - 1).
+        died_at_index = [count_map.get(i - 1, 0) for i in range(63)]
+
+        alive_running = total
+        rows: list[dict[str, object]] = []
+        for i, g in enumerate(games_sorted):
+            # alive after game_index i = total - sum_{j<=i} died_at_index[j]
+            alive_running -= died_at_index[i]
+            rows.append(
+                {
+                    "game_index": i,
+                    "game_id": g.id,
+                    "round": g.round,
+                    "region": g.region,
+                    "slot": g.slot,
+                    "alive_brackets": alive_running,
+                    "died_at_index": died_at_index[i],
+                    "alive_pct": alive_running / float(total),
+                }
+            )
+
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM game_survival;"))
+            if rows:
                 conn.execute(
                     text(
                         """
@@ -375,93 +496,16 @@ def recompute_game_survival(engine) -> None:
                         ) VALUES (
                             :game_index, :game_id, :round, :region, :slot,
                             :alive_brackets, :died_at_index, :alive_pct
-                        )
+                        );
                         """
                     ),
                     rows,
                 )
-            return
 
-        max_played_idx = max(game_index_by_id[gid] for gid in played_winner_by_game_id)
 
-        # died_at_index[i] = number of brackets that die at game index i.
-        died_at_index = [0] * num_games
-
-        bracket_q = session.query(Bracket.result_bits).filter(
-            Bracket.result_bits.isnot(None)
-        )
-
-        # Fast decode loop: stop once we pass max_played_idx, and stop immediately
-        # once a bracket is known to have died (first mismatch).
-        for (bits,) in bracket_q.yield_per(2000):
-            assert bits is not None
-            bits_int = int(bits)
-            winners_by_key: dict[str, int] = {}
-            death_step: int | None = None
-
-            for i, g in enumerate(games):
-                if i > max_played_idx:
-                    break
-
-                def resolve_source(src: str) -> int:
-                    if src.startswith("TEAM-"):
-                        return int(src.split("-", 1)[1])
-                    if src.startswith("WIN-"):
-                        upstream_gid = int(src.split("-", 1)[1])
-                        return winners_by_key[f"WIN-{upstream_gid}"]
-                    raise ValueError(f"Unknown team source: {src}")
-
-                t1_id = resolve_source(g.team1_source)
-                t2_id = resolve_source(g.team2_source)
-
-                team1_won = ((bits_int >> i) & 1) == 1
-                winner_id = t1_id if team1_won else t2_id
-
-                actual_winner = played_winner_by_game_id.get(g.id)
-                if actual_winner is not None and winner_id != actual_winner:
-                    death_step = i
-                    break
-
-                winners_by_key[f"WIN-{g.id}"] = winner_id
-
-            if death_step is not None:
-                died_at_index[death_step] += 1
-
-        # Convert died counts to alive counts by prefix sum.
-        died_prefix = 0
-        rows: list[dict[str, object]] = []
-        for i, g in enumerate(games):
-            died_prefix += died_at_index[i]
-            alive = total_brackets - died_prefix
-            rows.append(
-                {
-                    "game_index": i,
-                    "game_id": g.id,
-                    "round": g.round,
-                    "region": g.region,
-                    "slot": g.slot,
-                    "alive_brackets": alive,
-                    "died_at_index": died_at_index[i],
-                    "alive_pct": alive / float(total_brackets),
-                }
-            )
-
-        with engine.begin() as conn:
-            conn.execute(text("DELETE FROM game_survival;"))
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO game_survival (
-                        game_index, game_id, round, region, slot,
-                        alive_brackets, died_at_index, alive_pct
-                    ) VALUES (
-                        :game_index, :game_id, :round, :region, :slot,
-                        :alive_brackets, :died_at_index, :alive_pct
-                    )
-                    """
-                ),
-                rows,
-            )
+def recompute_game_survival(engine) -> None:
+    # Backwards-compatible name: rebuild the survival curve from survival_index.
+    rebuild_game_survival_from_survival_index(engine)
 
 
 # --- Streamlit UI ---
@@ -470,7 +514,25 @@ st.set_page_config(page_title="Bracket Simulator", layout="wide")
 
 try:
     ensure_bracket_loaded("MM_2026.json")
-    _ensure_derived_tables_exist(get_engine())
+    engine0 = get_engine()
+    _ensure_derived_tables_exist(engine0)
+
+    # If real results already exist (e.g. after a restart) but the survival table
+    # is empty, rebuild once so the Stats tab shows the correct curve.
+    with Session(engine0) as _s:
+        real_played = (
+            _s.query(RealResult.game_id)
+            .filter(RealResult.winner_team_id.isnot(None))
+            .limit(1)
+            .all()
+        )
+        survival_rows = _s.execute(text("SELECT count(*) FROM game_survival;")).scalar_one()
+        bracket_exists = _s.query(Bracket.id).filter(Bracket.result_bits.isnot(None)).limit(1).all()
+
+    if bracket_exists and survival_rows == 0:
+        if real_played:
+            rebuild_survival_from_real_results(engine0)
+        rebuild_game_survival_from_survival_index(engine0)
 except Exception as e:
     st.error("Database is not reachable. Start the Postgres container, then refresh the app.")
     st.code('docker start mm-postgres\n# or create it:\ndocker run --name mm-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=brackets -p 5432:5432 -d postgres:18')
@@ -536,6 +598,15 @@ with tab_results:
             col_a, col_b = st.columns(2)
 
             def save_winner(winner_id: int):
+                prev_winner_id = (
+                    session.query(RealResult.winner_team_id)
+                    .filter(RealResult.game_id == game.id)
+                    .one_or_none()
+                )
+                prev_winner_val = (
+                    int(prev_winner_id[0]) if prev_winner_id is not None else None
+                )
+
                 session.execute(
                     text("""
                     insert into real_results (game_id, winner_team_id, loser_team_id)
@@ -546,6 +617,21 @@ with tab_results:
                     {"gid": game.id, "wid": winner_id},
                 )
                 session.commit()
+
+                # Update packed-bracket survival incrementally.
+                # If the winner changed, we must rebuild because survival_index only decreases.
+                k = _bit_index_for_slot(game.slot)
+                true_bit = 1 if winner_id == t1_id else 0
+
+                if prev_winner_val is not None and prev_winner_val != int(winner_id):
+                    rebuild_survival_from_real_results(engine)
+                else:
+                    _apply_survival_update_for_game(
+                        session, game_index=k, true_bit=true_bit
+                    )
+                    session.commit()
+
+                rebuild_game_survival_from_survival_index(engine)
                 st.success("Saved result.")
 
             with col_a:
@@ -686,7 +772,13 @@ with tab_admin:
         engine = get_engine()
         from sqlalchemy import text
         with engine.begin() as conn:
-            conn.execute(text("TRUNCATE TABLE bracket_picks, brackets RESTART IDENTITY CASCADE;"))
+            conn.execute(
+                text(
+                    "TRUNCATE TABLE bracket_picks, brackets RESTART IDENTITY CASCADE;"
+                )
+            )
+            # Also clear derived UI tables so the app doesn't show stale stats.
+            conn.execute(text("TRUNCATE TABLE pick_stats, brackets_at_risk, game_survival;"))
         st.success("All brackets and picks deleted.")
 
     clear_results = st.checkbox("Confirm: delete ALL entered real results")
@@ -695,6 +787,9 @@ with tab_admin:
         from sqlalchemy import text
         with engine.begin() as conn:
             conn.execute(text("TRUNCATE TABLE real_results RESTART IDENTITY CASCADE;"))
+            # Reset bracket survival tracking since it depends on real results.
+            conn.execute(text("UPDATE brackets SET survival_index = 63;"))
+            conn.execute(text("TRUNCATE TABLE game_survival;"))
         st.success("All real results deleted.")
 
 
@@ -705,8 +800,6 @@ with tab_admin:
         engine = get_engine()
         with st.spinner("Recomputing pick stats from packed bracket outcomes..."):
             recompute_pick_stats_and_brackets_at_risk(engine)
-        with st.spinner("Recomputing perfect-bracket survival by game index..."):
-            recompute_game_survival(engine)
         st.success("Pick stats and brackets-at-risk recomputed.")
 
 with col_left:
