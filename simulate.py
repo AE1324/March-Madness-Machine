@@ -100,6 +100,22 @@ def _inv_logit(z: float) -> float:
     return 1.0 / (1.0 + math.exp(-z))
 
 
+def shock_sd_by_round(round_num: int) -> float:
+    """
+    Round-dependent performance variance (KenPom points shock SD).
+
+    Calibrated to reduce unrealistic late-round chaos.
+    """
+    return {
+        1: 1.9,  # Round of 64
+        2: 1.6,  # Round of 32
+        3: 1.25,  # Sweet 16
+        4: 1.05,  # Elite 8
+        5: 0.95,  # Final Four
+        6: 0.90,  # Championship
+    }.get(round_num, 1.0)
+
+
 def win_probability_fast(
     *,
     strength_base_a: float,
@@ -533,8 +549,8 @@ def simulate_bracket_outcome_bits_fast(
     game_specs: list[_GameSpec],
     num_noise_keys: int,
     *,
-    shock_sd: float = 3.5,
-    chaos_sd: float = 0.35,
+    shock_sd_multiplier: float = 1.0,
+    chaos_sd: float = 0.22,
 ) -> tuple[int, int]:
     num_games = len(game_specs)
     if num_games > 63:
@@ -548,8 +564,9 @@ def simulate_bracket_outcome_bits_fast(
         t1_id = spec.team1_val if spec.team1_kind == 0 else winners[spec.team1_val]
         t2_id = spec.team2_val if spec.team2_kind == 0 else winners[spec.team2_val]
 
-        strength_shock_a = random.gauss(0.0, shock_sd)
-        strength_shock_b = random.gauss(0.0, shock_sd)
+        sd = shock_sd_by_round(spec.round_num) * shock_sd_multiplier
+        strength_shock_a = random.gauss(0.0, sd)
+        strength_shock_b = random.gauss(0.0, sd)
 
         p = win_probability_fast(
             strength_base_a=team_fast.strength_base[t1_id],
@@ -579,8 +596,8 @@ def simulate_bracket_outcome_bits(
     teams_by_id: Dict[int, Team],
     games: list[TournamentGame],
     *,
-    shock_sd: float = 3.5,
-    chaos_sd: float = 0.35,
+    shock_sd_multiplier: float = 1.0,
+    chaos_sd: float = 0.22,
 ) -> tuple[int, int]:
     """
     Simulate a full bracket, returning:
@@ -605,8 +622,9 @@ def simulate_bracket_outcome_bits(
         team2 = _resolve_team(game.team2_source, teams_by_id, winners_by_key)
 
         # Game-level performance shocks (in KenPom points)
-        strength_shock_a = random.gauss(0.0, shock_sd)
-        strength_shock_b = random.gauss(0.0, shock_sd)
+        sd = shock_sd_by_round(game.round) * shock_sd_multiplier
+        strength_shock_a = random.gauss(0.0, sd)
+        strength_shock_b = random.gauss(0.0, sd)
 
         p = win_probability(
             team1,
