@@ -3,11 +3,198 @@ from __future__ import annotations
 import math
 import random
 from datetime import datetime
-from typing import Callable, Dict
+import io
+from typing import Callable, Dict, NamedTuple
 
 from sqlalchemy.orm import Session
 
 from models import Team, TournamentGame, Bracket
+
+# --- Constants for the win-probability model (kept module-level for speed) ---
+
+HIST_R64: dict[tuple[int, int], float] = {
+    (1, 16): 0.993,
+    (2, 15): 0.935,
+    (3, 14): 0.855,
+    (4, 13): 0.790,
+    (5, 12): 0.650,
+    (6, 11): 0.620,
+    (7, 10): 0.605,
+    (8, 9): 0.505,
+}
+
+HIST_R32: dict[tuple[int, int], float] = {
+    (1, 8): 0.75,
+    (1, 9): 0.75,
+    (2, 7): 0.70,
+    (2, 10): 0.70,
+    (3, 6): 0.65,
+    (3, 11): 0.65,
+    (4, 5): 0.60,
+    (4, 12): 0.60,
+    (5, 13): 0.65,
+    (6, 14): 0.70,
+    (7, 15): 0.75,
+    (8, 16): 0.80,
+}
+
+HIST_S16: dict[tuple[int, int], float] = {
+    (1, 4): 0.70,
+    (1, 5): 0.70,
+    (1, 8): 0.80,
+    (2, 3): 0.60,
+    (2, 6): 0.65,
+    (2, 7): 0.70,
+    (3, 4): 0.55,
+    (3, 5): 0.60,
+    (3, 8): 0.75,
+}
+
+HIST_E8: dict[tuple[int, int], float] = {
+    (1, 2): 0.60,
+    (1, 3): 0.65,
+    (1, 4): 0.70,
+    (2, 3): 0.55,
+    (2, 4): 0.60,
+    (3, 4): 0.55,
+}
+
+HIST_BY_ROUND: dict[int, dict[tuple[int, int], float]] = {
+    1: HIST_R64,
+    2: HIST_R32,
+    3: HIST_S16,
+    4: HIST_E8,
+}
+
+ALPHA_BY_ROUND: dict[int, float] = {1: 0.48, 2: 0.60, 3: 0.74, 4: 0.82, 5: 0.88, 6: 0.90}
+
+SCALE_BY_ROUND: dict[int, float] = {
+    1: 5.4,
+    2: 5.0,
+    3: 4.7,
+    4: 4.5,
+    5: 4.4,
+    6: 4.3,
+}
+
+TEMP_BY_ROUND: dict[int, float] = {1: 1.10, 2: 1.04, 3: 0.96, 4: 0.92, 5: 0.90, 6: 0.88}
+
+MAX_UNDERDOG_R64: dict[tuple[int, int], float] = {
+    (1, 16): 0.015,
+    (2, 15): 0.055,
+    (3, 14): 0.12,
+    (4, 13): 0.20,
+}
+
+
+def _logistic(diff: float, scale: float) -> float:
+    return 1.0 / (1.0 + math.exp(-diff / scale))
+
+
+def _logit(x: float) -> float:
+    return math.log(x / (1.0 - x))
+
+
+def _inv_logit(z: float) -> float:
+    return 1.0 / (1.0 + math.exp(-z))
+
+
+def win_probability_fast(
+    *,
+    strength_base_a: float,
+    strength_base_b: float,
+    seed_a: int,
+    seed_b: int,
+    kenpom_rank_a: float,
+    kenpom_rank_b: float,
+    round_num: int,
+    region_noise: float,
+    strength_shock_a: float,
+    strength_shock_b: float,
+) -> float:
+    """
+    Fast numeric win-probability: avoids Team attribute lookups.
+    kenpom_rank_* must be >=0 when present; pass -1 when missing.
+    """
+    ra_eff = strength_base_a + strength_shock_a
+    rb_eff = strength_base_b + strength_shock_b
+
+    raw_gap = ra_eff - rb_eff
+    gap = math.copysign(abs(raw_gap) ** 0.8, raw_gap)
+
+    scale = SCALE_BY_ROUND.get(round_num, 4.5)
+    p_model = _logistic(gap, scale)
+
+    sa, sb = seed_a, seed_b
+    better_seed, worse_seed = (sa, sb) if sa <= sb else (sb, sa)
+
+    hist_table = HIST_BY_ROUND.get(round_num, {})
+    p_hist_fav = hist_table.get((better_seed, worse_seed))
+    if p_hist_fav is None:
+        diff = worse_seed - better_seed
+        p_hist_fav = _logistic(diff, scale=2.0)
+
+    # KenPom rank adjustment (only for early rounds)
+    if round_num <= 2 and kenpom_rank_a >= 0 and kenpom_rank_b >= 0:
+        rank_gap = (kenpom_rank_b - kenpom_rank_a)
+        z_rank = rank_gap / 18.0
+        seed_gap = worse_seed - better_seed
+        effective_seed_gap = seed_gap - 0.35 * z_rank
+        p_hist_fav = _logistic(effective_seed_gap, scale=2.3)
+
+    if sa == better_seed:
+        p_hist = p_hist_fav
+    elif sb == better_seed:
+        p_hist = 1.0 - p_hist_fav
+    else:
+        p_hist = 0.5
+
+    alpha = ALPHA_BY_ROUND.get(round_num, 0.9)
+
+    p_model = min(max(p_model, 1e-6), 1 - 1e-6)
+    p_hist = min(max(p_hist, 1e-6), 1 - 1e-6)
+
+    z_model = _logit(p_model)
+    z_hist = _logit(p_hist)
+
+    z_blend = alpha * z_model + (1.0 - alpha) * z_hist
+    z_blend += region_noise
+    p = _inv_logit(z_blend)
+
+    temp = TEMP_BY_ROUND.get(round_num, 0.9)
+    p = min(max(p, 1e-6), 1 - 1e-6)
+    z = _logit(p)
+    p = _inv_logit(z / temp)
+
+    # Extreme R64 upset caps
+    if round_num == 1 and (better_seed, worse_seed) in MAX_UNDERDOG_R64:
+        max_ud = MAX_UNDERDOG_R64[(better_seed, worse_seed)]
+        if sa < sb:
+            p_ud = 1.0 - p  # team_a is favorite, p is P(team_a wins)
+            if p_ud > max_ud:
+                p = 1.0 - max_ud
+        else:
+            p_ud = p  # team_a is underdog
+            if p_ud > max_ud:
+                p = max_ud
+
+    return float(min(max(p, 0.0), 1.0))
+
+
+class _TeamFast(NamedTuple):
+    strength_base: list[float]
+    seed: list[int]
+    kenpom_rank: list[float]  # -1 when missing
+
+
+class _GameSpec(NamedTuple):
+    round_num: int
+    key_idx: int
+    team1_kind: int  # 0 fixed team, 1 upstream winner
+    team1_val: int   # team_id when fixed, upstream game_index when upstream
+    team2_kind: int
+    team2_val: int
+
 
 
 def win_probability(
@@ -234,6 +421,118 @@ def _get_ordered_games(session: Session) -> list[TournamentGame]:
     return games
 
 
+def _build_team_fast(teams_by_id: Dict[int, Team]) -> _TeamFast:
+    max_id = max(teams_by_id.keys()) if teams_by_id else 0
+    strength_base = [0.0] * (max_id + 1)
+    seed = [0] * (max_id + 1)
+    kenpom_rank = [-1.0] * (max_id + 1)
+
+    for tid, t in teams_by_id.items():
+        seed[tid] = int(t.seed)
+        rank = getattr(t, "kenpom_rank", None)
+        kenpom_rank[tid] = float(rank) if rank is not None else -1.0
+
+        adj_em = getattr(t, "adj_em", None)
+        if adj_em is not None:
+            strength_base[tid] = float(adj_em)
+        else:
+            rating = getattr(t, "rating", None)
+            if rating is not None:
+                strength_base[tid] = float(rating)
+            else:
+                # last resort fallback used by win_probability()
+                strength_base[tid] = float(17 - t.seed)
+
+    return _TeamFast(strength_base=strength_base, seed=seed, kenpom_rank=kenpom_rank)
+
+
+def _build_game_specs(games: list[TournamentGame]) -> tuple[list[_GameSpec], int]:
+    game_id_to_index = {g.id: i for i, g in enumerate(games)}
+
+    # (round, region) => key index for region_noise
+    noise_key_map: dict[tuple[int, str | None], int] = {}
+    next_key_idx = 0
+
+    specs: list[_GameSpec] = []
+    for i, g in enumerate(games):
+        key = (g.round, g.region)
+        if key not in noise_key_map:
+            noise_key_map[key] = next_key_idx
+            next_key_idx += 1
+        key_idx = noise_key_map[key]
+
+        def _parse_team_source(src: str) -> tuple[int, int]:
+            if src.startswith("TEAM-"):
+                return 0, int(src.split("-", 1)[1])
+            if src.startswith("WIN-"):
+                upstream_gid = int(src.split("-", 1)[1])
+                return 1, game_id_to_index[upstream_gid]
+            raise ValueError(f"Unknown team source format: {src}")
+
+        t1_kind, t1_val = _parse_team_source(g.team1_source)
+        t2_kind, t2_val = _parse_team_source(g.team2_source)
+
+        specs.append(
+            _GameSpec(
+                round_num=int(g.round),
+                key_idx=key_idx,
+                team1_kind=t1_kind,
+                team1_val=t1_val,
+                team2_kind=t2_kind,
+                team2_val=t2_val,
+            )
+        )
+
+    return specs, next_key_idx
+
+
+def simulate_bracket_outcome_bits_fast(
+    team_fast: _TeamFast,
+    game_specs: list[_GameSpec],
+    num_noise_keys: int,
+    *,
+    shock_sd: float = 3.5,
+    chaos_sd: float = 0.35,
+) -> tuple[int, int]:
+    num_games = len(game_specs)
+    if num_games > 63:
+        raise ValueError(f"Expected <= 63 tournament games, got {num_games}")
+
+    winners: list[int] = [0] * num_games
+    noise_shifts = [random.gauss(0.0, chaos_sd) for _ in range(num_noise_keys)]
+
+    result_bits = 0
+    for i, spec in enumerate(game_specs):
+        t1_id = spec.team1_val if spec.team1_kind == 0 else winners[spec.team1_val]
+        t2_id = spec.team2_val if spec.team2_kind == 0 else winners[spec.team2_val]
+
+        strength_shock_a = random.gauss(0.0, shock_sd)
+        strength_shock_b = random.gauss(0.0, shock_sd)
+
+        p = win_probability_fast(
+            strength_base_a=team_fast.strength_base[t1_id],
+            strength_base_b=team_fast.strength_base[t2_id],
+            seed_a=team_fast.seed[t1_id],
+            seed_b=team_fast.seed[t2_id],
+            kenpom_rank_a=team_fast.kenpom_rank[t1_id],
+            kenpom_rank_b=team_fast.kenpom_rank[t2_id],
+            round_num=spec.round_num,
+            region_noise=noise_shifts[spec.key_idx],
+            strength_shock_a=strength_shock_a,
+            strength_shock_b=strength_shock_b,
+        )
+
+        team1_won = random.random() < p
+        winner_id = t1_id if team1_won else t2_id
+        winners[i] = winner_id
+
+        if team1_won:
+            result_bits |= 1 << i
+
+    champion_team_id = winners[num_games - 1]
+    return result_bits, champion_team_id
+
+
 def simulate_bracket_outcome_bits(
     teams_by_id: Dict[int, Team],
     games: list[TournamentGame],
@@ -317,7 +616,11 @@ def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
     teams_by_id = {t.id: t for t in session.query(Team).all()}
     games = _get_ordered_games(session)
 
-    result_bits, champion_team_id = simulate_bracket_outcome_bits(teams_by_id, games)
+    team_fast = _build_team_fast(teams_by_id)
+    game_specs, num_noise_keys = _build_game_specs(games)
+    result_bits, champion_team_id = simulate_bracket_outcome_bits_fast(
+        team_fast, game_specs, num_noise_keys
+    )
 
     bracket = Bracket(
         model_version=model_version,
@@ -339,8 +642,8 @@ def generate_brackets(
 ) -> None:
     """
     Generate many brackets efficiently:
-    - simulate in Python
-    - write using bulk INSERT
+    - simulate in Python with pre-extracted numeric arrays
+    - write using Postgres `COPY` (fast) when available
     - commit per `batch_size`
     """
     if n <= 0:
@@ -348,29 +651,60 @@ def generate_brackets(
 
     teams_by_id = {t.id: t for t in session.query(Team).all()}
     games = _get_ordered_games(session)
+    team_fast = _build_team_fast(teams_by_id)
+    game_specs, num_noise_keys = _build_game_specs(games)
 
     remaining = n
     generated = 0
+
+    bind = session.get_bind()
+    dialect_name = getattr(getattr(bind, "dialect", None), "name", "")
+    use_postgres_copy = dialect_name == "postgresql"
+
     while remaining > 0:
         current_batch = min(batch_size, remaining)
         remaining -= current_batch
 
         now = datetime.utcnow()
-        mappings: list[dict[str, object]] = []
-        for _ in range(current_batch):
-            result_bits, champion_team_id = simulate_bracket_outcome_bits(
-                teams_by_id, games
-            )
-            mappings.append(
-                {
-                    "created_at": now,
-                    "model_version": model_version,
-                    "result_bits": result_bits,
-                    "champion_team_id": champion_team_id,
-                }
-            )
 
-        session.bulk_insert_mappings(Bracket, mappings)
+        if use_postgres_copy:
+            # COPY streaming avoids per-row INSERT overhead across the network.
+            created_at_str = now.strftime("%Y-%m-%d %H:%M:%S.%f")
+            mv = str(model_version).replace('"', '""')
+            # Build CSV lines in memory for this batch.
+            lines: list[str] = []
+            for _ in range(current_batch):
+                result_bits, champion_team_id = simulate_bracket_outcome_bits_fast(
+                    team_fast, game_specs, num_noise_keys
+                )
+                lines.append(
+                    f"{created_at_str},\"{mv}\",{result_bits},{champion_team_id}\n"
+                )
+            csv_data = "".join(lines)
+
+            sa_conn = session.connection()
+            raw_conn = sa_conn.connection
+            with raw_conn.cursor() as cur:
+                cur.copy_expert(
+                    "COPY brackets (created_at, model_version, result_bits, champion_team_id) FROM STDIN WITH (FORMAT csv)",
+                    io.StringIO(csv_data),
+                )
+        else:
+            mappings: list[dict[str, object]] = []
+            for _ in range(current_batch):
+                result_bits, champion_team_id = simulate_bracket_outcome_bits_fast(
+                    team_fast, game_specs, num_noise_keys
+                )
+                mappings.append(
+                    {
+                        "created_at": now,
+                        "model_version": model_version,
+                        "result_bits": result_bits,
+                        "champion_team_id": champion_team_id,
+                    }
+                )
+            session.bulk_insert_mappings(Bracket, mappings)
+
         session.commit()
         session.expunge_all()
 
