@@ -21,7 +21,7 @@ from stats import count_perfect_brackets, leaderboard, pick_percentages_by_round
 # --- DB helpers ---
 
 def get_engine():
-    url = os.getenv("DATABASE_URL")
+    url = os.getenv("DATABASE_URL") or st.secrets.get("DATABASE_URL", None)
     if url:
         return create_engine(url, future=True)
     return default_engine
@@ -141,7 +141,13 @@ def export_bracket_text(bracket_id: int) -> str:
 
 st.set_page_config(page_title="Bracket Simulator", layout="wide")
 
-ensure_bracket_loaded("MM_2026.json")
+try:
+    ensure_bracket_loaded("MM_2026.json")
+except Exception as e:
+    st.error("Database is not reachable. Start the Postgres container, then refresh the app.")
+    st.code('docker start mm-postgres\n# or create it:\ndocker run --name mm-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=brackets -p 5432:5432 -d postgres:18')
+    st.exception(e)
+    st.stop()
 
 st.title("March Madness Bracket Simulator")
 
