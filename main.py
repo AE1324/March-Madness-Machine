@@ -10,6 +10,8 @@ from models import TournamentGame
 
 
 def ensure_bracket_loaded(json_path: str = "MM_2026.json") -> None:
+    # Ensure schema exists (and new columns are present) before checking data.
+    init_db()
     session = SessionLocal()
     try:
         has_games = session.execute(select(TournamentGame).limit(1)).first() is not None

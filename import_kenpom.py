@@ -33,7 +33,16 @@ def main() -> None:
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
 
-    db_url = os.getenv("DATABASE_URL", "sqlite:///brackets.db")
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        # Fall back to SQLite only for local/dev runs.
+        db_url = "sqlite:///brackets.db"
+        print("WARNING: DATABASE_URL is not set; falling back to sqlite:///brackets.db")
+    else:
+        # Ensure schema is up to date (adds missing columns like `teams.kenpom`).
+        from db import init_db
+
+        init_db()
     engine = create_engine(db_url, future=True)
 
     with Session(engine) as session:
@@ -60,7 +69,7 @@ def main() -> None:
                 team.adj_em = float(row["adj_em"])
                 team.adj_o = float(row["adj_o"])
                 team.adj_d = float(row["adj_d"])
-                team.ad_tempo = float(row["adj_tempo"]) if "adj_tempo" in row else team.ad_tempo
+                team.adj_tempo = float(row["adj_tempo"]) if "adj_tempo" in row else team.adj_tempo
                 team.luck = float(row["luck"])
                 team.sos_adj_em = float(row["sos_adj_em"])
                 team.sos_adj_o = float(row["sos_adj_o"])

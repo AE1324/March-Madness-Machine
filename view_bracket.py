@@ -6,7 +6,8 @@ from collections import defaultdict
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from models import Team, TournamentGame, Bracket, BracketPick
+from models import Team, TournamentGame, Bracket
+from simulate import decode_bracket_winners
 
 REGIONS = ["East", "West", "South", "Midwest"]
 ROUND_LABEL = {1: "Round of 64", 2: "Round of 32", 3: "Sweet 16", 4: "Elite 8"}
@@ -61,16 +62,6 @@ def main() -> None:
         teams = session.query(Team).all()
         teams_by_id = {t.id: t for t in teams}
 
-        picks = (
-            session.query(BracketPick)
-            .filter(BracketPick.bracket_id == args.bracket_id)
-            .all()
-        )
-        if not picks:
-            raise SystemExit(f"No picks found for bracket_id={args.bracket_id}")
-
-        winner_by_game_id = {p.game_id: p.predicted_winner_team_id for p in picks}
-
         games = (
             session.query(TournamentGame)
             .order_by(TournamentGame.round.asc(), TournamentGame.id.asc())
@@ -78,6 +69,15 @@ def main() -> None:
         )
         if not games:
             raise SystemExit("No tournament games found. Load a bracket first.")
+
+        if bracket.result_bits is None:
+            raise SystemExit(
+                f"Bracket {args.bracket_id} has no result_bits. Regenerate with the new simulator."
+            )
+
+        winner_by_game_id = decode_bracket_winners(
+            int(bracket.result_bits), games, teams_by_id
+        )
 
         # Build per-region per-round ordered lists of games
         region_games: dict[str, dict[int, list[TournamentGame]]] = {

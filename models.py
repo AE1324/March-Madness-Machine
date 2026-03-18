@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import (
     Column,
     Integer,
+    BigInteger,
     String,
     Float,
     DateTime,
@@ -71,6 +72,14 @@ class Bracket(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     model_version: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Packed bracket outcomes (63 games for a 64-team tournament).
+    # Bit i corresponds to the i'th game in TournamentGame ordered by (round, id).
+    # Bit value 1 => team1_source won that game; 0 => team2_source won.
+    result_bits: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    champion_team_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("teams.id"), nullable=True, index=True
+    )
 
     picks: Mapped[list["BracketPick"]] = relationship("BracketPick", back_populates="bracket")
 

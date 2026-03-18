@@ -2,75 +2,12 @@ from __future__ import annotations
 
 import math
 import random
-from typing import Dict
+from datetime import datetime
+from typing import Callable, Dict
 
 from sqlalchemy.orm import Session
 
-from models import Team, TournamentGame, Bracket, BracketPick
-
-_NUMERIC_METRICS = [
-    "adj_em",
-    "adj_o",
-    "adj_d",
-    "adj_tempo",
-    "luck",
-    "sos_adj_em",
-    "sos_adj_o",
-    "sos_adj_d",
-    "ncsos_adj_em",
-]
-
-_METRIC_WEIGHTS = {
-    "adj_em": 1.30,
-    "adj_o": 0.35,
-    "adj_d": 0.35,      # lower is better (we flip sign below)
-    "adj_tempo": 0.08,
-    "luck": 0.05,
-    "sos_adj_em": 0.15,
-    "sos_adj_o": 0.08,
-    "sos_adj_d": 0.08,  # lower is better (we flip sign below)
-    "ncsos_adj_em": 0.08,
-}
-
-_UPSET_TABLE_BETTER_SEED_WINS = {
-    (1, 16): 0.99,
-    (2, 15): 0.93,
-    (3, 14): 0.85,
-    (4, 13): 0.79,
-    (5, 12): 0.65,
-    (6, 11): 0.63,
-    (7, 10): 0.60,
-    (8, 9): 0.50,
-}
-
-def _zscore_params(teams: list[Team]) -> dict[str, tuple[float, float]]:
-    vals = {m: [] for m in _NUMERIC_METRICS}
-    for t in teams:
-        kp = getattr(t, "kenpom", None) or {}
-        for m in _NUMERIC_METRICS:
-            v = kp.get(m)
-            if isinstance(v, (int, float)):
-                vals[m].append(float(v))
-
-    params = {}
-    for m, arr in vals.items():
-        if not arr:
-            params[m] = (0.0, 1.0)
-            continue
-        mean = sum(arr) / len(arr)
-        var = sum((x - mean) ** 2 for x in arr) / max(1, (len(arr) - 1))
-        std = math.sqrt(var)
-        if std < 1e-6:
-            std = 1.0
-        params[m] = (mean, std)
-    return params
-
-def _z(kp: dict, metric: str, params: dict[str, tuple[float, float]]) -> float:
-    mean, std = params[metric]
-    v = kp.get(metric)
-    if not isinstance(v, (int, float)):
-        return 0.0
-    return (float(v) - mean) / std
+from models import Team, TournamentGame, Bracket
 
 
 def win_probability(
@@ -81,8 +18,6 @@ def win_probability(
     strength_shock_a: float = 0.0,
     strength_shock_b: float = 0.0,
 ) -> float:
-    import math
-
     # --- Historical seed vs seed priors (P(better seed wins)) ---
 
     HIST_R64 = {
@@ -240,6 +175,8 @@ def win_probability(
     z_hist = logit(p_hist)
 
     z_blend = alpha * z_model + (1.0 - alpha) * z_hist
+    # Region-level chaos: a shared logit-space shift for this (round, region).
+    z_blend += region_noise
     p = inv_logit(z_blend)
 
     # --- 4) Round-dependent temperature transform ---
@@ -286,52 +223,47 @@ def _resolve_team(source: str, teams_by_id: Dict[int, Team], winners_by_key: Dic
         return teams_by_id[team_id]
     raise ValueError(f"Unknown team source format: {source}")
 
-
-def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
-    """
-    Simulate a single full tournament bracket.
-
-    Returns the created bracket ID.
-    """
-    teams = {t.id: t for t in session.query(Team).all()}
-    zparams = _zscore_params(list(teams.values()))
+def _get_ordered_games(session: Session) -> list[TournamentGame]:
     games = (
         session.query(TournamentGame)
         .order_by(TournamentGame.round.asc(), TournamentGame.id.asc())
         .all()
     )
-
     if not games:
         raise RuntimeError("No tournament games found. Load a bracket first.")
+    return games
 
-    bracket = Bracket(model_version=model_version)
-    session.add(bracket)
-    session.flush()  # assign bracket.id
+
+def simulate_bracket_outcome_bits(
+    teams_by_id: Dict[int, Team],
+    games: list[TournamentGame],
+    *,
+    shock_sd: float = 3.5,
+    chaos_sd: float = 0.35,
+) -> tuple[int, int]:
+    """
+    Simulate a full bracket, returning:
+    - result_bits: packed 63-bit "team1 vs team2 won" outcomes
+    - champion_team_id: the winning team id of the last game in `games`
+    """
+    num_games = len(games)
+    if num_games > 63:
+        raise ValueError(f"Expected <= 63 tournament games, got {num_games}")
 
     winners_by_key: Dict[str, int] = {}
-    picks: list[BracketPick] = []
-
-    import random
-
-    ...
-    winners_by_key: Dict[str, int] = {}
-    picks: list[BracketPick] = []
-
-    # region+round chaos: one shock per (round, region)
     region_round_noise: Dict[tuple[int, str | None], float] = {}
+    result_bits = 0
 
-    for game in games:
+    for i, game in enumerate(games):
         key = (game.round, game.region)
         if key not in region_round_noise:
-            # 0.35 std dev is what you suggested
-            region_round_noise[key] = random.gauss(0.0, 0.35)
+            region_round_noise[key] = random.gauss(0.0, chaos_sd)
         noise = region_round_noise[key]
 
-        team1 = _resolve_team(game.team1_source, teams, winners_by_key)
-        team2 = _resolve_team(game.team2_source, teams, winners_by_key)
+        team1 = _resolve_team(game.team1_source, teams_by_id, winners_by_key)
+        team2 = _resolve_team(game.team2_source, teams_by_id, winners_by_key)
 
         # Game-level performance shocks (in KenPom points)
-        shock_sd = 3.5  # tuneable
         strength_shock_a = random.gauss(0.0, shock_sd)
         strength_shock_b = random.gauss(0.0, shock_sd)
 
@@ -344,34 +276,105 @@ def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
             strength_shock_b=strength_shock_b,
         )
 
-        if random.random() < p:
-            winner = team1
-        else:
-            winner = team2
+        team1_won = random.random() < p
+        winner = team1 if team1_won else team2
+
+        if team1_won:
+            result_bits |= 1 << i
 
         winners_by_key[f"WIN-{game.id}"] = winner.id
 
-        picks.append(
-            BracketPick(
-                bracket_id=bracket.id,
-                game_id=game.id,
-                predicted_winner_team_id=winner.id,
-            )
-        )
+    champion_team_id = winners_by_key[f"WIN-{games[-1].id}"]
+    return result_bits, champion_team_id
 
-    session.bulk_save_objects(picks)
+
+def decode_bracket_winners(
+    result_bits: int,
+    games: list[TournamentGame],
+    teams_by_id: Dict[int, Team],
+) -> dict[int, int]:
+    """
+    Decode packed `result_bits` into {game_id -> winner_team_id}.
+    """
+    winners_by_key: Dict[str, int] = {}
+    winners_by_game_id: dict[int, int] = {}
+
+    for i, game in enumerate(games):
+        team1_won = ((result_bits >> i) & 1) == 1
+        team1 = _resolve_team(game.team1_source, teams_by_id, winners_by_key)
+        team2 = _resolve_team(game.team2_source, teams_by_id, winners_by_key)
+        winner = team1 if team1_won else team2
+        winners_by_key[f"WIN-{game.id}"] = winner.id
+        winners_by_game_id[game.id] = winner.id
+
+    return winners_by_game_id
+
+
+def simulate_single_bracket(session: Session, model_version: str = "v1") -> int:
+    """
+    Simulate a single full tournament bracket and persist it.
+    """
+    teams_by_id = {t.id: t for t in session.query(Team).all()}
+    games = _get_ordered_games(session)
+
+    result_bits, champion_team_id = simulate_bracket_outcome_bits(teams_by_id, games)
+
+    bracket = Bracket(
+        model_version=model_version,
+        result_bits=result_bits,
+        champion_team_id=champion_team_id,
+        created_at=datetime.utcnow(),
+    )
+    session.add(bracket)
     session.commit()
-    return bracket.id
+    return int(bracket.id)
 
 
-def generate_brackets(session: Session, n: int, batch_size: int = 10_000, model_version: str = "v1") -> None:
+def generate_brackets(
+    session: Session,
+    n: int,
+    batch_size: int = 10_000,
+    model_version: str = "v1",
+    progress_callback: Callable[[int], None] | None = None,
+) -> None:
     """
-    Generate many brackets, committing in batches for performance.
+    Generate many brackets efficiently:
+    - simulate in Python
+    - write using bulk INSERT
+    - commit per `batch_size`
     """
+    if n <= 0:
+        return
+
+    teams_by_id = {t.id: t for t in session.query(Team).all()}
+    games = _get_ordered_games(session)
+
     remaining = n
+    generated = 0
     while remaining > 0:
         current_batch = min(batch_size, remaining)
-        for _ in range(current_batch):
-            simulate_single_bracket(session, model_version=model_version)
         remaining -= current_batch
+
+        now = datetime.utcnow()
+        mappings: list[dict[str, object]] = []
+        for _ in range(current_batch):
+            result_bits, champion_team_id = simulate_bracket_outcome_bits(
+                teams_by_id, games
+            )
+            mappings.append(
+                {
+                    "created_at": now,
+                    "model_version": model_version,
+                    "result_bits": result_bits,
+                    "champion_team_id": champion_team_id,
+                }
+            )
+
+        session.bulk_insert_mappings(Bracket, mappings)
+        session.commit()
+        session.expunge_all()
+
+        generated += current_batch
+        if progress_callback is not None:
+            progress_callback(generated)
 

@@ -9,8 +9,8 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from db import engine as default_engine
-from models import Team, TournamentGame, Bracket, BracketPick
-from simulate import simulate_single_bracket
+from models import Team, TournamentGame, Bracket, RealResult
+from simulate import generate_brackets, decode_bracket_winners
 from view_bracket import main as view_bracket_main  # we'll re-use its logic indirectly
 from main import ensure_bracket_loaded
 
@@ -54,22 +54,26 @@ def export_bracket_text(bracket_id: int) -> str:
 
     engine = get_engine()
     with Session(engine) as session:
+        bracket = session.query(Bracket).filter(Bracket.id == bracket_id).one_or_none()
+        if bracket is None:
+            return f"No bracket found for bracket_id={bracket_id}\n"
+
+        if bracket.result_bits is None:
+            return (
+                f"Bracket {bracket_id} has no result_bits. Regenerate with the new simulator.\n"
+            )
+
         teams = session.query(Team).all()
         teams_by_id = {t.id: t for t in teams}
 
-        picks = (
-            session.query(BracketPick)
-            .filter(BracketPick.bracket_id == bracket_id)
-            .all()
-        )
-        if not picks:
-            return f"No picks found for bracket {bracket_id}\n"
-
-        winner_by_game_id = {p.game_id: p.predicted_winner_team_id for p in picks}
         games = (
             session.query(TournamentGame)
             .order_by(TournamentGame.round.asc(), TournamentGame.id.asc())
             .all()
+        )
+
+        winner_by_game_id = decode_bracket_winners(
+            int(bracket.result_bits), games, teams_by_id
         )
 
         # We'll reuse the same text format as view_bracket: simple region-wise summary
@@ -137,12 +141,165 @@ def export_bracket_text(bracket_id: int) -> str:
         return "\n".join(out)
 
 
+def _ensure_derived_tables_exist(engine) -> None:
+    """
+    Denormalized helper tables for the UI.
+    These are not represented as ORM models, so we create them on demand.
+    """
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS pick_stats (
+                    round INTEGER NOT NULL,
+                    team_id INTEGER NOT NULL,
+                    picks BIGINT NOT NULL,
+                    pct DOUBLE PRECISION NOT NULL
+                );
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS brackets_at_risk (
+                    round INTEGER NOT NULL,
+                    region TEXT,
+                    slot TEXT NOT NULL,
+                    team_id INTEGER NOT NULL,
+                    brackets_needing BIGINT NOT NULL,
+                    pct_among_perfect DOUBLE PRECISION NOT NULL
+                );
+                """
+            )
+        )
+
+
+def recompute_pick_stats_and_brackets_at_risk(engine) -> None:
+    """
+    Recompute `pick_stats` and `brackets_at_risk` using `brackets.result_bits`.
+    """
+    _ensure_derived_tables_exist(engine)
+
+    with Session(engine) as session:
+        teams_by_id = {t.id: t for t in session.query(Team).all()}
+        games = (
+            session.query(TournamentGame)
+            .order_by(TournamentGame.round.asc(), TournamentGame.id.asc())
+            .all()
+        )
+        if not games:
+            raise RuntimeError("No tournament games found. Load a bracket first.")
+
+        played_rows = session.query(RealResult.game_id, RealResult.winner_team_id).all()
+        played_winner_by_game_id = {
+            gid: wid for gid, wid in played_rows if wid is not None
+        }
+        result_game_ids = {gid for gid, _ in played_rows}
+        future_games = [g for g in games if g.id not in result_game_ids]
+
+        bracket_q = session.query(Bracket.id, Bracket.result_bits).filter(
+            Bracket.result_bits.isnot(None)
+        )
+        bracket_count = bracket_q.count()
+        if bracket_count == 0:
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM pick_stats;"))
+                conn.execute(text("DELETE FROM brackets_at_risk;"))
+            return
+
+        pick_counts: dict[tuple[int, int], int] = {}
+        risk_counts: dict[tuple[int, str | None, str, int], int] = {}
+        perfect_brackets = 0
+
+        for _, bits in bracket_q.yield_per(2000):
+            assert bits is not None
+            winners_by_game_id = decode_bracket_winners(
+                int(bits), games, teams_by_id
+            )
+
+            # Pick distributions by round (all brackets).
+            for g in games:
+                win_tid = winners_by_game_id[g.id]
+                key = (g.round, win_tid)
+                pick_counts[key] = pick_counts.get(key, 0) + 1
+
+            # Perfect bracket check (played games only).
+            is_perfect = True
+            for gid, actual_winner_tid in played_winner_by_game_id.items():
+                if winners_by_game_id.get(gid) != actual_winner_tid:
+                    is_perfect = False
+                    break
+
+            if is_perfect:
+                perfect_brackets += 1
+                for g in future_games:
+                    win_tid = winners_by_game_id[g.id]
+                    rkey = (g.round, g.region, g.slot, win_tid)
+                    risk_counts[rkey] = risk_counts.get(rkey, 0) + 1
+
+        pick_rows: list[dict[str, object]] = []
+        for (rnd, team_id), cnt in pick_counts.items():
+            pick_rows.append(
+                {
+                    "round": rnd,
+                    "team_id": team_id,
+                    "picks": cnt,
+                    "pct": cnt / float(bracket_count),
+                }
+            )
+
+        risk_rows: list[dict[str, object]] = []
+        denom = float(perfect_brackets) if perfect_brackets > 0 else 1.0
+        for (rnd, region, slot, team_id), cnt in risk_counts.items():
+            risk_rows.append(
+                {
+                    "round": rnd,
+                    "region": region,
+                    "slot": slot,
+                    "team_id": team_id,
+                    "brackets_needing": cnt,
+                    "pct_among_perfect": cnt / denom,
+                }
+            )
+
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM pick_stats;"))
+            conn.execute(text("DELETE FROM brackets_at_risk;"))
+
+            if pick_rows:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO pick_stats (round, team_id, picks, pct)
+                        VALUES (:round, :team_id, :picks, :pct)
+                        """
+                    ),
+                    pick_rows,
+                )
+            if risk_rows:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO brackets_at_risk (
+                            round, region, slot, team_id, brackets_needing, pct_among_perfect
+                        )
+                        VALUES (
+                            :round, :region, :slot, :team_id, :brackets_needing, :pct_among_perfect
+                        )
+                        """
+                    ),
+                    risk_rows,
+                )
+
+
 # --- Streamlit UI ---
 
 st.set_page_config(page_title="Bracket Simulator", layout="wide")
 
 try:
     ensure_bracket_loaded("MM_2026.json")
+    _ensure_derived_tables_exist(get_engine())
 except Exception as e:
     st.error("Database is not reachable. Start the Postgres container, then refresh the app.")
     st.code('docker start mm-postgres\n# or create it:\ndocker run --name mm-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=brackets -p 5432:5432 -d postgres:18')
@@ -340,101 +497,8 @@ with tab_admin:
     
     if st.button("Recompute pick percentages and brackets at risk (all brackets)"):
         engine = get_engine()
-        from sqlalchemy import text
-        with engine.begin() as conn:
-            # Recompute pick_stats
-            conn.execute(text("TRUNCATE TABLE pick_stats;"))
-            conn.execute(text("""
-            INSERT INTO pick_stats (round, team_id, picks, pct)
-            WITH n AS (
-              SELECT count(*)::float AS n FROM brackets
-            ),
-            raw AS (
-              SELECT
-                tg.round,
-                bp.predicted_winner_team_id AS team_id,
-                count(*)::float AS picks
-              FROM bracket_picks bp
-              JOIN tournament_games tg ON tg.id = bp.game_id
-              GROUP BY tg.round, bp.predicted_winner_team_id
-            )
-            SELECT
-              r.round,
-              r.team_id,
-              r.picks,
-              r.picks / nullif((SELECT n FROM n), 0)
-            FROM raw r;
-            """))
-            # Recompute brackets_at_risk
-            conn.execute(text("TRUNCATE TABLE brackets_at_risk;"))
-            conn.execute(text("""
-            INSERT INTO brackets_at_risk (
-              round, region, slot, team_id, brackets_needing, pct_among_perfect
-            )
-            WITH played AS (
-              SELECT game_id, winner_team_id
-              FROM real_results
-              WHERE winner_team_id IS NOT NULL
-            ),
-            wrong AS (
-              SELECT bp.bracket_id
-              FROM bracket_picks bp
-              JOIN played p ON p.game_id = bp.game_id
-              WHERE bp.predicted_winner_team_id <> p.winner_team_id
-              GROUP BY bp.bracket_id
-            ),
-            perfect AS (
-              SELECT b.id AS bracket_id
-              FROM brackets b
-              WHERE NOT EXISTS (
-                SELECT 1
-                FROM wrong w
-                WHERE w.bracket_id = b.id
-              )
-            ),
-            future_games AS (
-              SELECT g.id, g.round, g.region, g.slot
-              FROM tournament_games g
-              LEFT JOIN real_results r ON r.game_id = g.id
-              WHERE r.game_id IS NULL
-            ),
-            picks AS (
-              SELECT
-                fg.id AS game_id,
-                fg.round,
-                fg.region,
-                fg.slot,
-                bp.predicted_winner_team_id AS team_id
-              FROM future_games fg
-              JOIN bracket_picks bp ON bp.game_id = fg.id
-              JOIN perfect pf ON pf.bracket_id = bp.bracket_id
-            ),
-            by_team AS (
-              SELECT
-                p.game_id,
-                p.round,
-                p.region,
-                p.slot,
-                p.team_id,
-                COUNT(*)::float AS cnt
-              FROM picks p
-              GROUP BY p.game_id, p.round, p.region, p.slot, p.team_id
-            ),
-            total AS (
-              SELECT game_id, SUM(cnt) AS total_cnt
-              FROM by_team
-              GROUP BY game_id
-            )
-            SELECT
-              bt.round,
-              bt.region,
-              bt.slot,
-              bt.team_id,
-              bt.cnt::bigint AS brackets_needing,
-              (bt.cnt / NULLIF(tot.total_cnt,0)) AS pct_among_perfect
-            FROM by_team bt
-            JOIN total tot ON tot.game_id = bt.game_id;
-            """))
+        with st.spinner("Recomputing pick stats from packed bracket outcomes..."):
+            recompute_pick_stats_and_brackets_at_risk(engine)
         st.success("Pick stats and brackets-at-risk recomputed.")
 
 with col_left:
@@ -451,27 +515,34 @@ with col_left:
 
     if st.button("Generate", type="primary"):
         engine = get_engine()
-        new_ids = []
-
+        total = int(n)
         progress = st.progress(0)
         status = st.empty()
-
-        total = int(n)
         with Session(engine) as session:
-            from simulate import simulate_single_bracket as sim_one
-            for i in range(total):
-                bid = sim_one(session)
-                new_ids.append(bid)
+            def _cb(so_far: int) -> None:
+                pct = int((so_far / max(total, 1)) * 100)
+                progress.progress(min(100, max(pct, 0)))
+                status.text(f"Generated {so_far} of {total} brackets...")
 
-                # update progress bar
-                pct = int((i + 1) / total * 100)
-                progress.progress(pct)
-                status.text(f"Generated {i + 1} of {total} brackets...")
+            generate_brackets(
+                session,
+                n=total,
+                batch_size=10_000,
+                progress_callback=_cb,
+            )
 
-        if new_ids:
-            status.text("")  # clear status
-            st.success(f"Generated {len(new_ids)} bracket(s). Latest ID: {new_ids[-1]}")
-            st.session_state["last_bracket_id"] = new_ids[-1]
+            # Best-effort "latest id" for the UI; IDs are monotonic.
+            latest_id = (
+                session.query(Bracket.id)
+                .order_by(Bracket.id.desc())
+                .limit(1)
+                .scalar()
+            )
+
+        if latest_id is not None:
+            status.text("")
+            st.success(f"Generated {total} bracket(s). Latest ID: {int(latest_id)}")
+            st.session_state["last_bracket_id"] = int(latest_id)
 
     st.divider()
     st.subheader("Generate + download (.zip)")
@@ -486,12 +557,33 @@ with col_left:
 
     if st.button("Generate & download ZIP"):
         engine = get_engine()
-        new_ids = []
+        zip_n_int = int(zip_n)
+        progress = st.progress(0)
+        status = st.empty()
         with Session(engine) as session:
-            from simulate import simulate_single_bracket as sim_one
-            for _ in range(int(zip_n)):
-                bid = sim_one(session)
-                new_ids.append(bid)
+            start_id = session.query(Bracket.id).order_by(Bracket.id.desc()).limit(1).scalar()
+            start_id = int(start_id) if start_id is not None else 0
+
+            def _cb(so_far: int) -> None:
+                pct = int((so_far / max(zip_n_int, 1)) * 100)
+                progress.progress(min(100, max(pct, 0)))
+                status.text(f"Generated {so_far} of {zip_n_int} brackets...")
+
+            generate_brackets(
+                session,
+                n=zip_n_int,
+                batch_size=2000,
+                progress_callback=_cb,
+            )
+
+            status.text("")
+            rows = (
+                session.query(Bracket.id)
+                .filter(Bracket.id > start_id)
+                .order_by(Bracket.id.asc())
+                .all()
+            )
+            new_ids = [int(r[0]) for r in rows]
 
         from io import BytesIO
         import zipfile
@@ -504,7 +596,12 @@ with col_left:
 
         zip_bytes = zip_buf.getvalue()
 
-        st.success(f"Generated {len(new_ids)} bracket(s). IDs {new_ids[0]}–{new_ids[-1]}")
+        if new_ids:
+            st.success(
+                f"Generated {len(new_ids)} bracket(s). IDs {new_ids[0]}–{new_ids[-1]}"
+            )
+        else:
+            st.success("Generated 0 bracket(s).")
         st.download_button(
             label="Download ZIP",
             data=zip_bytes,
