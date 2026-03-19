@@ -23,6 +23,8 @@ Set the database URL in every terminal session that runs the app or CLI:
 export DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/brackets"
 ```
 
+Example: see `.env.example`.
+
 ---
 
 ## 2. Install dependencies
@@ -54,9 +56,8 @@ Key libraries:
 - `load_bracket.py` – loads an official bracket JSON (`MM_2026.json`) into `teams` and `tournament_games`.
 - `import_kenpom.py` – imports cleaned KenPom metrics into `Team` rows (AdjEM, tempo, luck, SOS, rank).
 - `simulate.py` – core simulation logic and `win_probability` model:
-  - blends KenPom AdjEM with historical seed‑vs‑seed win rates by round,
-  - adds game‑level performance variance and region‑level chaos,
-  - caps extreme upsets to realistic modern rates.
+  - blends KenPom AdjEM (plus per-game shocks) with a seed-structural prior in logit space,
+  - adds region-level correlated noise and round-dependent temperature scaling.
 - `view_bracket.py` – renders a single bracket as readable text (or writes it to a `.txt` file).
 - `stats.py` – helper queries for:
   - perfect brackets remaining,
@@ -156,28 +157,15 @@ Tabs in the app:
 
 ## 6. How the probability model works (high‑level)
 
-For each game:
+The simulator computes a per-game win probability in `simulate.py`:
+- **Strength + shocks**: AdjEM is perturbed by round-dependent Gaussian “performance shocks”.
+- **Optional rank correction**: KenPom rank difference nudges the win probability when available.
+- **Round-dependent gap compression**: the strength gap is transformed with a round-specific exponent.
+- **Seed structural prior**: seed distance adds a structured prior, blended with the KenPom term in logit space.
+- **Region systemic noise**: each (round, region) shares a correlated noise component to generate realistic upset paths.
+- **Temperature scaling**: a round-specific temperature sharpens/softens probabilities.
 
-- **KenPom strength**:
-  - Use AdjEM (and KenPom ranks) for `Team.adj_em` and `Team.kenpom_rank`.
-  - Apply a round‑dependent logistic with non‑linear gap compression.
-- **Historical priors**:
-  - Seed‑vs‑seed win rates by round are used as a Bayesian prior (in logit space), with:
-    - stronger influence in early rounds (R64),
-    - decaying influence by Final Four / Championship.
-- **Game‑level variance**:
-  - Each team gets a per‑game performance shock (Gaussian in “points”) added to AdjEM.
-  - This models hot/cold shooting, fouls, fatigue, etc.
-- **Region‑level chaos**:
-  - Each (round, region) gets a shared random shift in logit space, creating upset clusters and path correlations.
-- **Extreme upset caps**:
-  - For R64 only, max underdog win probabilities for 1–16, 2–15, 3–14, 4–13 are capped to realistic modern rates.
-
-Together, this produces:
-
-- realistic R64 upset counts and distributions,
-- plausible Final Four/champion distributions,
-- and high bracket entropy suitable for “perfect bracket survival” experiments.
+The generation path encodes all 63 game outcomes into `brackets.result_bits` for efficient storage.
 
 ---
 
@@ -188,6 +176,9 @@ Together, this produces:
 ```bash
 python main.py --generate 1000
 ```
+
+For reproducibility, you can also pass a fixed RNG seed:
+`python main.py --generate 1000 --model-version v1 --seed 12345`
 
 Each bracket:
 
@@ -213,6 +204,7 @@ If you want to discard all generated brackets but keep the tournament structure 
 ```bash
 docker exec -i mm-postgres psql -U postgres -d brackets <<'SQL'
 TRUNCATE TABLE
+  bracket_picks,
   brackets
 RESTART IDENTITY CASCADE;
 SQL
@@ -231,5 +223,90 @@ Use the **Admin** tab → “Delete ALL brackets and picks”.
 - The stats helpers are written to aggregate efficiently, but for extreme scales you may want to:
   - pre‑aggregate pick stats into a summary table,
   - and cache per‑bracket scores after each real‑life round.
+
+
+---
+
+## Research-Grade Repo Extras
+
+### Overview
+This repository provides a KenPom-driven simulator that generates large volumes of March Madness brackets and stores outcomes in PostgreSQL using a compact bit-packed representation. The Streamlit dashboard supports:
+- perfect bracket survival tracking
+- pick distribution analytics
+- a live leaderboard as you enter real game results
+
+### Architecture Diagram
+See: `docs/ARCHITECTURE.md`
+
+```mermaid
+flowchart TD
+  User[User] --> UI[Streamlit app: app.py]
+  UI -->|SQLAlchemy ORM| DB[(PostgreSQL)]
+  UI -->|simulate & bulk load| Sim[simulate.py]
+  Sim --> Brackets[brackets.result_bits (bit-packed)]
+  UI -->|enter real outcomes| Real[real_results]
+  UI -->|incremental SQL update| Survival[brackets.survival_index → game_survival]
+  UI -->|scan+aggregate| Stats[pick_stats / brackets_at_risk]
+  UI --> View[view_bracket.py (decode & export)]
+```
+
+### Model Methodology
+See: `docs/MODEL_METHODODOLOGY.md`
+
+### Reproducible Instructions
+See: `docs/REPRODUCIBILITY.md`
+
+Key point: bracket generation supports an optional RNG seed for deterministic single-process runs:
+`python main.py --generate N --model-version v1 --seed 12345`
+
+### Running Simulations Locally
+1. Start PostgreSQL and set `DATABASE_URL`:
+   ```bash
+   export DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/brackets"
+   ```
+2. Initialize + load tournament structure + import KenPom:
+   ```bash
+   python main.py --init-db
+   python main.py --load-bracket MM_2026.json
+   python import_kenpom.py /path/to/kenpom_2026_clean.csv
+   ```
+3. Generate brackets:
+   ```bash
+   python main.py --generate 1000000 --model-version v1 --seed 12345
+   ```
+4. Start the dashboard:
+   ```bash
+   streamlit run app.py
+   ```
+
+### Generating Millions of Brackets
+- Use large values of `N` with a fixed `model_version`.
+- For dashboard operations, expect “Admin recompute” to be the slowest step because it decodes and aggregates across stored brackets.
+- If you plan to store tens/hundreds of millions, ensure Docker Desktop disk image size is large enough for Postgres + WAL headroom (see `docs/BENCHMARKS.md` and Docker settings).
+
+### Database Scaling Strategy
+Main strategy:
+- store 63 outcomes per bracket in `brackets.result_bits` (single `BIGINT`)
+- track “perfect bracket remaining” using `brackets.survival_index` (no decode needed after each real game)
+- keep dashboard responsive via derived tables (`game_survival`, `pick_stats`, `brackets_at_risk`)
+
+### Visualization Dashboard
+See: `docs/DASHBOARD_GUIDE.md`
+
+### Example Outputs
+This repo includes example tournament JSON graphs:
+- `bracket_example.json`
+- `bracket_example_no_ratings.json`
+
+To export a generated bracket to text:
+```bash
+python view_bracket.py <BRACKET_ID> --out bracket_<BRACKET_ID>.txt
+```
+
+### Performance Benchmarks
+See: `docs/BENCHMARKS.md`
+
+### Dashboard Screenshots
+See: `docs/SCREENSHOTS.md`
 
 
