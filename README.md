@@ -1,6 +1,6 @@
 ## March Madness Bracket Simulator
 
-This project simulates March Madness brackets using a **KenPom‑driven, historically‑calibrated probability model**, and stores up to **1,000,000 AI‑generated brackets** in PostgreSQL so you can:
+This project simulates March Madness brackets using a **KenPom‑driven, historically‑calibrated probability model**, and stores bracket outcomes in PostgreSQL in a **compact bit‑packed format** so you can:
 
 - track how long brackets stay perfect,
 - see pick distributions by round/team,
@@ -15,8 +15,7 @@ The primary UI is a **Streamlit web app** (`app.py`).
 
 - Python 3.10+
 - `pip`
-- Docker (for the Postgres container used in Codespaces)
-- PostgreSQL running at `postgresql://postgres:postgres@localhost:5432/brackets`
+- PostgreSQL (typically via Docker)
 
 Set the database URL in every terminal session that runs the app or CLI:
 
@@ -51,7 +50,7 @@ Key libraries:
   - `TournamentGame` (bracket structure, round/region/slot)
   - `RealResult` (actual tournament outcomes)
   - `Bracket` (one row per simulated bracket)
-  - `BracketPick` (one row per game pick per bracket)
+  - `BracketPick` exists for backward compatibility, but new simulations store all 63 game outcomes in `brackets.result_bits` (bit-packed). This avoids catastrophic scaling from “one row per pick”.
 - `load_bracket.py` – loads an official bracket JSON (`MM_2026.json`) into `teams` and `tournament_games`.
 - `import_kenpom.py` – imports cleaned KenPom metrics into `Team` rows (AdjEM, tempo, luck, SOS, rank).
 - `simulate.py` – core simulation logic and `win_probability` model:
@@ -151,6 +150,7 @@ Tabs in the app:
   - **Pick % by round**: how often each team is picked to advance in a given round.
 - **Admin**
   - Button to truncate all generated brackets/picks and reset IDs (keeps teams/games/results).
+  - “Recompute pick percentages and brackets at risk” scans generated brackets and shows progress while it runs.
 
 ---
 
@@ -192,7 +192,8 @@ python main.py --generate 1000
 Each bracket:
 
 - gets a unique ID in `brackets.id`,
-- and 63 picks in `bracket_picks`.
+- stores all 63 game outcomes in `brackets.result_bits` (packed bits).
+- `bracket_picks` may remain empty for new simulations (legacy/backward compatibility only).
 
 ### 7.2 View/export a single bracket
 
@@ -212,7 +213,6 @@ If you want to discard all generated brackets but keep the tournament structure 
 ```bash
 docker exec -i mm-postgres psql -U postgres -d brackets <<'SQL'
 TRUNCATE TABLE
-  bracket_picks,
   brackets
 RESTART IDENTITY CASCADE;
 SQL
@@ -226,7 +226,7 @@ Use the **Admin** tab → “Delete ALL brackets and picks”.
 
 ## 9. Scaling notes
 
-- 1,000,000 brackets → ~63M `bracket_picks` rows.
+- 1,000,000 brackets → 1,000,000 `brackets` rows (bit-packed `result_bits`), plus derived/aggregate tables used by the UI.
 - Use batch generation (e.g. 10k at a time) and avoid heavy full‑table scans in the app.
 - The stats helpers are written to aggregate efficiently, but for extreme scales you may want to:
   - pre‑aggregate pick stats into a summary table,
