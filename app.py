@@ -193,7 +193,11 @@ def _ensure_derived_tables_exist(engine) -> None:
         )
 
 
-def recompute_pick_stats_and_brackets_at_risk(engine) -> None:
+def recompute_pick_stats_and_brackets_at_risk(
+    engine,
+    *,
+    progress_callback=None,
+) -> None:
     """
     Recompute `pick_stats` and `brackets_at_risk` using `brackets.result_bits`.
     """
@@ -201,11 +205,8 @@ def recompute_pick_stats_and_brackets_at_risk(engine) -> None:
 
     with Session(engine) as session:
         teams_by_id = {t.id: t for t in session.query(Team).all()}
-        games = (
-            session.query(TournamentGame)
-            .order_by(TournamentGame.round.asc(), TournamentGame.id.asc())
-            .all()
-        )
+        # IMPORTANT: decode assumes games are in packed-bit order (0..62).
+        games = _ordered_games_by_bit_index(session)
         if not games:
             raise RuntimeError("No tournament games found. Load a bracket first.")
 
@@ -214,7 +215,7 @@ def recompute_pick_stats_and_brackets_at_risk(engine) -> None:
             gid: wid for gid, wid in played_rows if wid is not None
         }
         result_game_ids = {gid for gid, _ in played_rows}
-        future_games = [g for g in games if g.id not in result_game_ids]
+        future_game_indices = [i for i, g in enumerate(games) if g.id not in result_game_ids]
 
         bracket_q = session.query(Bracket.id, Bracket.result_bits).filter(
             Bracket.result_bits.isnot(None)
@@ -226,35 +227,88 @@ def recompute_pick_stats_and_brackets_at_risk(engine) -> None:
                 conn.execute(text("DELETE FROM brackets_at_risk;"))
             return
 
-        pick_counts: dict[tuple[int, int], int] = {}
-        risk_counts: dict[tuple[int, str | None, str, int], int] = {}
+        from collections import defaultdict
+
+        pick_counts: dict[tuple[int, int], int] = defaultdict(int)
+        risk_counts: dict[tuple[int, str | None, str, int], int] = defaultdict(int)
         perfect_brackets = 0
+        processed = 0
+
+        # Precompile a fast decoder (no per-bracket string parsing/dict resolution).
+        game_id_to_index = {g.id: i for i, g in enumerate(games)}
+        t1_is_team: list[bool] = []
+        t1_val: list[int] = []
+        t2_is_team: list[bool] = []
+        t2_val: list[int] = []
+        rounds: list[int] = []
+        regions: list[str | None] = []
+        slots: list[str] = []
+
+        for g in games:
+            rounds.append(int(g.round))
+            regions.append(g.region)
+            slots.append(str(g.slot))
+
+            def _compile_source(src: str) -> tuple[bool, int]:
+                if src.startswith("TEAM-"):
+                    return True, int(src.split("-", 1)[1])
+                if src.startswith("WIN-"):
+                    upstream_gid = int(src.split("-", 1)[1])
+                    return False, int(game_id_to_index[upstream_gid])
+                raise ValueError(f"Unrecognized team source: {src}")
+
+            is_team_1, v1 = _compile_source(str(g.team1_source))
+            is_team_2, v2 = _compile_source(str(g.team2_source))
+            t1_is_team.append(is_team_1)
+            t1_val.append(v1)
+            t2_is_team.append(is_team_2)
+            t2_val.append(v2)
+
+        played_checks: list[tuple[int, int]] = []
+        for gid, wid in played_winner_by_game_id.items():
+            idx = game_id_to_index.get(gid)
+            if idx is not None:
+                played_checks.append((idx, int(wid)))
+
+        def _decode_winners_list(bits_int: int) -> list[int]:
+            winners: list[int] = [0] * len(games)
+            for i in range(len(games)):
+                a = t1_val[i] if t1_is_team[i] else winners[t1_val[i]]
+                b = t2_val[i] if t2_is_team[i] else winners[t2_val[i]]
+                team1_won = ((bits_int >> i) & 1) == 1
+                winners[i] = a if team1_won else b
+            return winners
+
+        if progress_callback is not None:
+            progress_callback(0, bracket_count)
 
         for _, bits in bracket_q.yield_per(2000):
             assert bits is not None
-            winners_by_game_id = decode_bracket_winners(
-                int(bits), games, teams_by_id
-            )
+            winners = _decode_winners_list(int(bits))
 
             # Pick distributions by round (all brackets).
-            for g in games:
-                win_tid = winners_by_game_id[g.id]
-                key = (g.round, win_tid)
-                pick_counts[key] = pick_counts.get(key, 0) + 1
+            for i in range(len(games)):
+                pick_counts[(rounds[i], winners[i])] += 1
 
             # Perfect bracket check (played games only).
             is_perfect = True
-            for gid, actual_winner_tid in played_winner_by_game_id.items():
-                if winners_by_game_id.get(gid) != actual_winner_tid:
+            for idx, actual_winner_tid in played_checks:
+                if winners[idx] != actual_winner_tid:
                     is_perfect = False
                     break
 
             if is_perfect:
                 perfect_brackets += 1
-                for g in future_games:
-                    win_tid = winners_by_game_id[g.id]
-                    rkey = (g.round, g.region, g.slot, win_tid)
-                    risk_counts[rkey] = risk_counts.get(rkey, 0) + 1
+                for j in future_game_indices:
+                    rkey = (rounds[j], regions[j], slots[j], winners[j])
+                    risk_counts[rkey] += 1
+
+            processed += 1
+            if progress_callback is not None and (processed % 2000 == 0):
+                progress_callback(processed, bracket_count)
+
+        if progress_callback is not None:
+            progress_callback(bracket_count, bracket_count)
 
         pick_rows: list[dict[str, object]] = []
         for (rnd, team_id), cnt in pick_counts.items():
@@ -527,9 +581,9 @@ try:
             .all()
         )
         survival_rows = _s.execute(text("SELECT count(*) FROM game_survival;")).scalar_one()
-        bracket_exists = _s.query(Bracket.id).filter(Bracket.result_bits.isnot(None)).limit(1).all()
+        any_brackets = _s.query(Bracket.id).filter(Bracket.result_bits.isnot(None)).limit(1).all()
 
-    if bracket_exists and survival_rows == 0:
+    if any_brackets and survival_rows == 0:
         if real_played:
             rebuild_survival_from_real_results(engine0)
         rebuild_game_survival_from_survival_index(engine0)
@@ -798,8 +852,20 @@ with tab_admin:
     
     if st.button("Recompute pick percentages and brackets at risk (all brackets)"):
         engine = get_engine()
+        progress = st.progress(0)
+        status = st.empty()
+        import time
+        t0 = time.time()
+
+        def _cb(done: int, total: int) -> None:
+            pct = int((done / max(total, 1)) * 100)
+            progress.progress(min(100, max(pct, 0)))
+            elapsed = time.time() - t0
+            status.text(f"Processed {done:,} / {total:,} brackets ({pct}%) — {elapsed:0.1f}s elapsed")
+
         with st.spinner("Recomputing pick stats from packed bracket outcomes..."):
-            recompute_pick_stats_and_brackets_at_risk(engine)
+            recompute_pick_stats_and_brackets_at_risk(engine, progress_callback=_cb)
+        status.text("")
         st.success("Pick stats and brackets-at-risk recomputed.")
 
 with col_left:
@@ -839,6 +905,10 @@ with col_left:
                 .limit(1)
                 .scalar()
             )
+
+        # Refresh survival curve derived table so the Stats chart reflects the
+        # newly generated bracket population immediately.
+        rebuild_game_survival_from_survival_index(engine)
 
         if latest_id is not None:
             status.text("")
@@ -886,6 +956,9 @@ with col_left:
             )
             new_ids = [int(r[0]) for r in rows]
 
+        # Keep survival curve in sync with new brackets.
+        rebuild_game_survival_from_survival_index(engine)
+
         from io import BytesIO
         import zipfile
 
@@ -927,15 +1000,22 @@ with col_right:
 
     if st.button("Load bracket"):
         if not bracket_exists(bracket_id):
+            st.session_state.pop("loaded_bracket_text", None)
+            st.session_state.pop("loaded_bracket_id", None)
             st.error(f"Bracket {bracket_id} does not exist.")
         else:
             text_out = export_bracket_text(bracket_id)
-            st.text_area("Bracket", text_out, height=600)
+            st.session_state["loaded_bracket_text"] = text_out
+            st.session_state["loaded_bracket_id"] = int(bracket_id)
 
-            # Download button
-            st.download_button(
-                label="Download as .txt",
-                data=text_out,
-                file_name=f"bracket_{bracket_id}.txt",
-                mime="text/plain",
-            )
+    loaded_text = st.session_state.get("loaded_bracket_text")
+    loaded_id = st.session_state.get("loaded_bracket_id")
+    if loaded_text and loaded_id:
+        st.text_area("Bracket", loaded_text, height=600)
+
+        st.download_button(
+            label="Download as .txt",
+            data=loaded_text,
+            file_name=f"bracket_{loaded_id}.txt",
+            mime="text/plain",
+        )

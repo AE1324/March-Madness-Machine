@@ -79,21 +79,21 @@ SCALE_BY_ROUND: dict[int, float] = {
 }
 
 TEMP_BY_ROUND: dict[int, float] = {
-    1: 1.04,
-    2: 1.00,
-    3: 0.96,
-    4: 0.92,
-    5: 0.90,
-    6: 0.88,
+    1: 1.18,
+    2: 1.12,
+    3: 1.05,
+    4: 1.02,
+    5: 1.00,
+    6: 0.98,
 }
 
 ALPHA_BY_ROUND: dict[int, float] = {
-    1: 0.42,
-    2: 0.55,
-    3: 0.70,
-    4: 0.80,
-    5: 0.88,
-    6: 0.92,
+    1: 0.30,
+    2: 0.42,
+    3: 0.55,
+    4: 0.65,
+    5: 0.72,
+    6: 0.76,
 }
 
 REGION_CHAOS: dict[int, float] = {
@@ -132,13 +132,13 @@ def shock_sd_by_round(round_num: int) -> float:
     Calibrated to reduce unrealistic late-round chaos.
     """
     return {
-        1: 1.7,
-        2: 1.45,
-        3: 1.15,
-        4: 0.95,
-        5: 0.85,
-        6: 0.80,
-    }[round_num]
+        1: 2.2,
+        2: 1.9,
+        3: 1.6,
+        4: 1.4,
+        5: 1.3,
+        6: 1.25,
+    }.get(round_num, 1.3)
 
 
 def win_probability_fast(
@@ -168,7 +168,16 @@ def win_probability_fast(
         raw_gap += 0.018 * (kenpom_rank_b - kenpom_rank_a)
 
     # ✔ preserve elite separation
-    gap = math.copysign(abs(raw_gap) ** POWER_EXP, raw_gap)
+    if round_num == 1:
+        gap = math.copysign(abs(raw_gap) ** 0.62, raw_gap)
+    elif round_num == 2:
+        gap = math.copysign(abs(raw_gap) ** 0.66, raw_gap)
+    elif round_num == 3:
+        gap = math.copysign(abs(raw_gap) ** 0.70, raw_gap)
+    elif round_num == 4:
+        gap = math.copysign(abs(raw_gap) ** 0.73, raw_gap)
+    else:
+        gap = math.copysign(abs(raw_gap) ** 0.76, raw_gap)
 
     scale = SCALE_BY_ROUND[round_num]
     p_model = _logistic(gap, scale)
@@ -264,12 +273,12 @@ def win_probability(
 
     # KenPom model weight (logit blend) by round
     ALPHA_BY_ROUND = {
-        1: 0.48,
-        2: 0.60,
-        3: 0.74,
-        4: 0.82,
-        5: 0.88,
-        6: 0.90,
+        1: 0.52, 
+        2: 0.64, 
+        3: 0.72, 
+        4: 0.78, 
+        5: 0.83, 
+        6: 0.86,
     }
 
     # Round-dependent KenPom logistic scale (later rounds more deterministic)
@@ -284,12 +293,12 @@ def win_probability(
 
     # Round-dependent temperature
     TEMP_BY_ROUND = {
-        1: 1.10,
-        2: 1.04,
-        3: 0.96,
-        4: 0.92,
-        5: 0.90,
-        6: 0.88,
+        1: 1.12,
+        2: 1.06,
+        3: 1.00,
+        4: 0.97,
+        5: 0.95,
+        6: 0.94,
     }
 
     # Extreme R64 upset caps (max underdog win probability)
@@ -597,7 +606,7 @@ def simulate_bracket_outcome_bits(
     games: list[TournamentGame],
     *,
     shock_sd_multiplier: float = 1.0,
-    chaos_sd: float = 0.22,
+    chaos_sd: float = 0.30,
 ) -> tuple[int, int]:
     """
     Simulate a full bracket, returning:
