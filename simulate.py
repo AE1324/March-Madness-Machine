@@ -67,18 +67,43 @@ HIST_BY_ROUND: dict[int, dict[tuple[int, int], float]] = {
     4: HIST_E8,
 }
 
-ALPHA_BY_ROUND: dict[int, float] = {1: 0.48, 2: 0.60, 3: 0.74, 4: 0.82, 5: 0.88, 6: 0.90}
+POWER_EXP: float = 0.94
 
 SCALE_BY_ROUND: dict[int, float] = {
-    1: 5.4,
-    2: 5.0,
-    3: 4.7,
-    4: 4.5,
-    5: 4.4,
-    6: 4.3,
+    1: 4.2,
+    2: 4.0,
+    3: 3.8,
+    4: 3.7,
+    5: 3.6,
+    6: 3.5,
 }
 
-TEMP_BY_ROUND: dict[int, float] = {1: 1.10, 2: 1.04, 3: 0.96, 4: 0.92, 5: 0.90, 6: 0.88}
+TEMP_BY_ROUND: dict[int, float] = {
+    1: 1.04,
+    2: 1.00,
+    3: 0.96,
+    4: 0.92,
+    5: 0.90,
+    6: 0.88,
+}
+
+ALPHA_BY_ROUND: dict[int, float] = {
+    1: 0.42,
+    2: 0.55,
+    3: 0.70,
+    4: 0.80,
+    5: 0.88,
+    6: 0.92,
+}
+
+REGION_CHAOS: dict[int, float] = {
+    1: 0.16,
+    2: 0.14,
+    3: 0.11,
+    4: 0.09,
+    5: 0.06,
+    6: 0.045,
+}
 
 MAX_UNDERDOG_R64: dict[tuple[int, int], float] = {
     (1, 16): 0.015,
@@ -107,13 +132,13 @@ def shock_sd_by_round(round_num: int) -> float:
     Calibrated to reduce unrealistic late-round chaos.
     """
     return {
-        1: 1.9,  # Round of 64
-        2: 1.6,  # Round of 32
-        3: 1.25,  # Sweet 16
-        4: 1.05,  # Elite 8
-        5: 0.95,  # Final Four
-        6: 0.90,  # Championship
-    }.get(round_num, 1.0)
+        1: 1.7,
+        2: 1.45,
+        3: 1.15,
+        4: 0.95,
+        5: 0.85,
+        6: 0.80,
+    }[round_num]
 
 
 def win_probability_fast(
@@ -133,69 +158,44 @@ def win_probability_fast(
     Fast numeric win-probability: avoids Team attribute lookups.
     kenpom_rank_* must be >=0 when present; pass -1 when missing.
     """
-    ra_eff = strength_base_a + strength_shock_a
-    rb_eff = strength_base_b + strength_shock_b
+    ra = strength_base_a + strength_shock_a
+    rb = strength_base_b + strength_shock_b
 
-    raw_gap = ra_eff - rb_eff
-    gap = math.copysign(abs(raw_gap) ** 0.8, raw_gap)
+    raw_gap = ra - rb
 
-    scale = SCALE_BY_ROUND.get(round_num, 4.5)
+    # ✔ KenPom rank correction (very important)
+    if kenpom_rank_a >= 0 and kenpom_rank_b >= 0:
+        raw_gap += 0.018 * (kenpom_rank_b - kenpom_rank_a)
+
+    # ✔ preserve elite separation
+    gap = math.copysign(abs(raw_gap) ** POWER_EXP, raw_gap)
+
+    scale = SCALE_BY_ROUND[round_num]
     p_model = _logistic(gap, scale)
 
-    sa, sb = seed_a, seed_b
-    better_seed, worse_seed = (sa, sb) if sa <= sb else (sb, sa)
+    # ✔ seed structural prior
+    seed_diff = abs(seed_a - seed_b)
+    seed_curve = _logistic(seed_diff, 2.15)
 
-    hist_table = HIST_BY_ROUND.get(round_num, {})
-    p_hist_fav = hist_table.get((better_seed, worse_seed))
-    if p_hist_fav is None:
-        diff = worse_seed - better_seed
-        p_hist_fav = _logistic(diff, scale=2.0)
+    decay = {1: 1.0, 2: 0.82, 3: 0.64, 4: 0.48, 5: 0.32, 6: 0.20}[round_num]
+    p_seed = 0.5 + (seed_curve - 0.5) * decay
 
-    # KenPom rank adjustment (only for early rounds)
-    if round_num <= 2 and kenpom_rank_a >= 0 and kenpom_rank_b >= 0:
-        rank_gap = (kenpom_rank_b - kenpom_rank_a)
-        z_rank = rank_gap / 18.0
-        seed_gap = worse_seed - better_seed
-        effective_seed_gap = seed_gap - 0.35 * z_rank
-        p_hist_fav = _logistic(effective_seed_gap, scale=2.3)
+    if seed_a > seed_b:
+        p_seed = 1 - p_seed
 
-    if sa == better_seed:
-        p_hist = p_hist_fav
-    elif sb == better_seed:
-        p_hist = 1.0 - p_hist_fav
-    else:
-        p_hist = 0.5
+    alpha = ALPHA_BY_ROUND[round_num]
 
-    alpha = ALPHA_BY_ROUND.get(round_num, 0.9)
+    z = alpha * _logit(p_model) + (1.0 - alpha) * _logit(p_seed)
 
-    p_model = min(max(p_model, 1e-6), 1 - 1e-6)
-    p_hist = min(max(p_hist, 1e-6), 1 - 1e-6)
+    # ✔ region systemic variance
+    z += region_noise * REGION_CHAOS[round_num]
 
-    z_model = _logit(p_model)
-    z_hist = _logit(p_hist)
+    p = _inv_logit(z)
 
-    z_blend = alpha * z_model + (1.0 - alpha) * z_hist
-    z_blend += region_noise
-    p = _inv_logit(z_blend)
+    temp = TEMP_BY_ROUND[round_num]
+    p = _inv_logit(_logit(p) / temp)
 
-    temp = TEMP_BY_ROUND.get(round_num, 0.9)
-    p = min(max(p, 1e-6), 1 - 1e-6)
-    z = _logit(p)
-    p = _inv_logit(z / temp)
-
-    # Extreme R64 upset caps
-    if round_num == 1 and (better_seed, worse_seed) in MAX_UNDERDOG_R64:
-        max_ud = MAX_UNDERDOG_R64[(better_seed, worse_seed)]
-        if sa < sb:
-            p_ud = 1.0 - p  # team_a is favorite, p is P(team_a wins)
-            if p_ud > max_ud:
-                p = 1.0 - max_ud
-        else:
-            p_ud = p  # team_a is underdog
-            if p_ud > max_ud:
-                p = max_ud
-
-    return float(min(max(p, 0.0), 1.0))
+    return max(1e-6, min(1.0 - 1e-6, float(p)))
 
 
 class _TeamFast(NamedTuple):
@@ -380,7 +380,6 @@ def win_probability(
 
     z_blend = alpha * z_model + (1.0 - alpha) * z_hist
     # Region-level chaos: a shared logit-space shift for this (round, region).
-    z_blend += region_noise
     p = inv_logit(z_blend)
 
     # --- 4) Round-dependent temperature transform ---
@@ -550,14 +549,15 @@ def simulate_bracket_outcome_bits_fast(
     num_noise_keys: int,
     *,
     shock_sd_multiplier: float = 1.0,
-    chaos_sd: float = 0.22,
 ) -> tuple[int, int]:
     num_games = len(game_specs)
     if num_games > 63:
         raise ValueError(f"Expected <= 63 tournament games, got {num_games}")
 
     winners: list[int] = [0] * num_games
-    noise_shifts = [random.gauss(0.0, chaos_sd) for _ in range(num_noise_keys)]
+    noise_shifts = [
+        random.gauss(0.0, REGION_CHAOS[spec.round_num]) for spec in game_specs
+    ]
 
     result_bits = 0
     for i, spec in enumerate(game_specs):
@@ -576,7 +576,7 @@ def simulate_bracket_outcome_bits_fast(
             kenpom_rank_a=team_fast.kenpom_rank[t1_id],
             kenpom_rank_b=team_fast.kenpom_rank[t2_id],
             round_num=spec.round_num,
-            region_noise=noise_shifts[spec.key_idx],
+            region_noise=noise_shifts[i],
             strength_shock_a=strength_shock_a,
             strength_shock_b=strength_shock_b,
         )

@@ -1,6 +1,7 @@
 import os
 import csv
 import argparse
+import re
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -27,6 +28,17 @@ def to_float(v: str):
     return float(v)
 
 
+def _normalize_name(s: str) -> str:
+    """
+    Normalize team names so CSV names can match DB names despite punctuation
+    differences (e.g. "St. John's" vs "St Johns", "Miami (FL)" vs "Miami FL").
+    """
+    s = (s or "").strip().lower()
+    s = s.replace("’", "'")
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    return s
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description="Import KenPom metrics CSV into Team columns")
     p.add_argument("csv_path", help="kenpom_2026_clean.csv")
@@ -48,21 +60,27 @@ def main() -> None:
     with Session(engine) as session:
         teams = session.query(Team).all()
         teams_by_name = {t.name: t for t in teams}
+        teams_by_norm: dict[str, Team] = {_normalize_name(t.name): t for t in teams}
 
         updated = 0
         missing: list[str] = []
+        exact_hits = 0
+        norm_hits = 0
 
         with open(args.csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for idx, row in enumerate(reader, start=1):
                 name = (row["team_name"] or "").strip()
                 
-
-                if name not in teams_by_name:
-                    missing.append(name)
-                    continue
-
-                team = teams_by_name[name]
+                team = teams_by_name.get(name)
+                if team is None:
+                    team = teams_by_norm.get(_normalize_name(name))
+                    if team is None:
+                        missing.append(name)
+                        continue
+                    norm_hits += 1
+                else:
+                    exact_hits += 1
 
                 # Rank is just the order in the cleaned file
                 team.kenpom_rank = idx
@@ -82,12 +100,18 @@ def main() -> None:
                 updated += 1
 
         if missing:
-            print("\nNames in KenPom CSV not found in DB (must match teams.name exactly):")
+            print(
+                "\nNames in KenPom CSV not matched to any DB team "
+                "(exact or normalized):"
+            )
             for n in sorted(set(missing))[:60]:
                 print(f"- {n}")
             extra = len(set(missing)) - 60
             if extra > 0:
                 print(f"... and {extra} more")
+
+        print(f"\nMatched by exact name: {exact_hits}")
+        print(f"Matched by normalized name: {norm_hits}")
 
         if args.dry_run:
             session.rollback()
