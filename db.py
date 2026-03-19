@@ -6,12 +6,17 @@ class Base(DeclarativeBase):
     """Base class for all ORM models."""
 
 
-# Default to a local SQLite database. You can change this to a PostgreSQL URL
-# like "postgresql+psycopg2://user:password@localhost:5432/brackets"
 import os
-DATABASE_URL="postgresql+psycopg2://postgres:postgres@localhost:5432/brackets"
+
+# Prefer an explicit DATABASE_URL, with a sensible local default.
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+psycopg2://postgres:postgres@localhost:5432/brackets",
+)
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is not set. Set it to your Postgres URL before running.")
+    raise RuntimeError(
+        "DATABASE_URL is not set. Set it to your Postgres URL before running."
+    )
 
 
 
