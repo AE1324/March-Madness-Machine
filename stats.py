@@ -86,7 +86,7 @@ def count_perfect_brackets(session: Session) -> int:
         session.query(func.count(Bracket.id))
         .filter(Bracket.result_bits.isnot(None))
         .filter(Bracket.survival_index >= max_k)
-        .scalar_one()
+        .scalar()
     )
 
 

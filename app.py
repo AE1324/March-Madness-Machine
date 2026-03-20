@@ -423,14 +423,14 @@ def _apply_survival_update_for_game(
     *,
     game_index: int,
     true_bit: int,
-) -> None:
+) -> int:
     """
     One-step scalable elimination update for game bit index `game_index`.
     Sets survival_index := min(survival_index, game_index - 1) for incorrect brackets.
     """
     # Clamp: first game index (0) kills to -1.
     new_survival = game_index - 1
-    session.execute(
+    result = session.execute(
         text(
             """
             UPDATE brackets
@@ -441,6 +441,109 @@ def _apply_survival_update_for_game(
         ),
         {"new_survival": new_survival, "game_index": game_index, "true_bit": true_bit},
     )
+
+    # Number of brackets whose survival_index was updated for this game.
+    # For Postgres this should reflect the number of eliminated (incorrect) brackets.
+    return int(result.rowcount or 0)
+
+
+def _apply_survival_update_for_game_with_progress(
+    session: Session,
+    *,
+    game_index: int,
+    true_bit: int,
+    progress_callback=None,
+    id_window: int = 200_000,
+) -> tuple[int, int]:
+    """
+    Chunked survival update with progress reporting.
+
+    Returns:
+      (updated_count, total_candidates_checked)
+    """
+    total_candidates = int(
+        session.execute(
+            text(
+                """
+                SELECT count(*)
+                FROM brackets
+                WHERE result_bits IS NOT NULL
+                  AND survival_index >= :game_index;
+                """
+            ),
+            {"game_index": game_index},
+        ).scalar_one()
+    )
+    if total_candidates == 0:
+        if progress_callback is not None:
+            progress_callback(0, 0, 0)
+        return 0, 0
+
+    min_max = session.execute(
+        text(
+            """
+            SELECT min(id), max(id)
+            FROM brackets
+            WHERE result_bits IS NOT NULL
+              AND survival_index >= :game_index;
+            """
+        ),
+        {"game_index": game_index},
+    ).one()
+    min_id = int(min_max[0])
+    max_id = int(min_max[1])
+
+    checked = 0
+    updated_total = 0
+    new_survival = game_index - 1
+
+    lo = min_id
+    while lo <= max_id:
+        hi = lo + id_window - 1
+
+        in_window = int(
+            session.execute(
+                text(
+                    """
+                    SELECT count(*)
+                    FROM brackets
+                    WHERE id BETWEEN :lo AND :hi
+                      AND result_bits IS NOT NULL
+                      AND survival_index >= :game_index;
+                    """
+                ),
+                {"lo": lo, "hi": hi, "game_index": game_index},
+            ).scalar_one()
+        )
+
+        if in_window > 0:
+            upd = session.execute(
+                text(
+                    """
+                    UPDATE brackets
+                    SET survival_index = LEAST(survival_index, :new_survival)
+                    WHERE id BETWEEN :lo AND :hi
+                      AND result_bits IS NOT NULL
+                      AND survival_index >= :game_index
+                      AND ((result_bits >> :game_index) & 1) != :true_bit;
+                    """
+                ),
+                {
+                    "new_survival": new_survival,
+                    "lo": lo,
+                    "hi": hi,
+                    "game_index": game_index,
+                    "true_bit": true_bit,
+                },
+            )
+            updated_total += int(upd.rowcount or 0)
+            checked += in_window
+            if progress_callback is not None:
+                progress_callback(checked, total_candidates, updated_total)
+
+        lo = hi + 1
+
+    return updated_total, total_candidates
 
 
 def rebuild_survival_from_real_results(engine) -> None:
@@ -555,6 +658,112 @@ def rebuild_game_survival_from_survival_index(engine) -> None:
                     ),
                     rows,
                 )
+
+
+def _ensure_game_survival_initialized(engine, session: Session) -> int:
+    """
+    Ensure `game_survival` is populated.
+
+    When no real results have been entered yet, all brackets should still have
+    survival_index = 63, so the initial survival curve is uniform:
+      alive_brackets(game_index=i) = total_brackets for all i in [0..62].
+
+    Returns the total bracket count used for alive_pct.
+    """
+    existing = session.execute(text("SELECT count(*) FROM game_survival;")).scalar_one()
+    if existing and existing > 0:
+        total = session.execute(
+            text("SELECT alive_brackets FROM game_survival WHERE game_index = 0;")
+        ).scalar_one()
+        return int(total)
+
+    total = (
+        session.query(Bracket.id)
+        .filter(Bracket.result_bits.isnot(None))
+        .count()
+    )
+    if total == 0:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM game_survival;"))
+        return 0
+
+    games_sorted = _ordered_games_by_bit_index(session)
+    rows: list[dict[str, object]] = []
+    for i, g in enumerate(games_sorted):
+        rows.append(
+            {
+                "game_index": i,
+                "game_id": g.id,
+                "round": g.round,
+                "region": g.region,
+                "slot": g.slot,
+                "alive_brackets": total,
+                "died_at_index": 0,
+                "alive_pct": 1.0,
+            }
+        )
+
+    with engine.begin() as conn:
+        conn.execute(text("DELETE FROM game_survival;"))
+        conn.execute(
+            text(
+                """
+                INSERT INTO game_survival (
+                    game_index, game_id, round, region, slot,
+                    alive_brackets, died_at_index, alive_pct
+                ) VALUES (
+                    :game_index, :game_id, :round, :region, :slot,
+                    :alive_brackets, :died_at_index, :alive_pct
+                );
+                """
+            ),
+            rows,
+        )
+    return int(total)
+
+
+def _apply_game_survival_incremental_update(
+    engine,
+    session: Session,
+    *,
+    game_index: int,
+    delta_died_at_index: int,
+    total_brackets: int,
+) -> None:
+    """
+    Incrementally update `game_survival` after applying a survival_index update
+    for a single game bit index.
+
+    If `delta_died_at_index` brackets die at game_index=k, then:
+    - died_at_index(k) increases by delta
+    - alive_brackets(i) decreases by delta for all i >= k
+    - alive_pct is updated accordingly
+    """
+    if delta_died_at_index <= 0 or total_brackets <= 0:
+        return
+
+    session.execute(
+        text(
+            """
+            UPDATE game_survival
+            SET
+              alive_brackets = alive_brackets - :delta,
+              alive_pct = (alive_brackets - :delta)::double precision / :total
+            WHERE game_index >= :k;
+            """
+        ),
+        {"delta": delta_died_at_index, "total": total_brackets, "k": game_index},
+    )
+    session.execute(
+        text(
+            """
+            UPDATE game_survival
+            SET died_at_index = died_at_index + :delta
+            WHERE game_index = :k;
+            """
+        ),
+        {"delta": delta_died_at_index, "k": game_index},
+    )
 
 
 def recompute_game_survival(engine) -> None:
@@ -680,11 +889,46 @@ with tab_results:
                 if prev_winner_val is not None and prev_winner_val != int(winner_id):
                     rebuild_survival_from_real_results(engine)
                 else:
-                    _apply_survival_update_for_game(
-                        session, game_index=k, true_bit=true_bit
+                    progress = st.progress(0)
+                    status = st.empty()
+                    import time
+                    t0 = time.time()
+
+                    def _progress_cb(done: int, total: int, eliminated: int) -> None:
+                        pct = int((done / max(total, 1)) * 100)
+                        progress.progress(min(100, max(pct, 0)))
+                        elapsed = time.time() - t0
+                        left = max(total - done, 0)
+                        status.text(
+                            f"Checked {done:,}/{total:,} brackets ({pct}%) | "
+                            f"remaining {left:,} | eliminated {eliminated:,} | "
+                            f"{elapsed:0.1f}s elapsed"
+                        )
+
+                    # Speed up heavy elimination updates on large tables.
+                    session.execute(text("SET LOCAL synchronous_commit = OFF;"))
+                    delta, _checked = _apply_survival_update_for_game_with_progress(
+                        session,
+                        game_index=k,
+                        true_bit=true_bit,
+                        progress_callback=_progress_cb,
                     )
                     session.commit()
+                    total = _ensure_game_survival_initialized(engine, session)
+                    _apply_game_survival_incremental_update(
+                        engine,
+                        session,
+                        game_index=k,
+                        delta_died_at_index=delta,
+                        total_brackets=total,
+                    )
+                    session.commit()
+                    status.text("")
+                    st.success("Saved result.")
+                    return
 
+                # Winner changed: survival_index only decreases, so we must fully
+                # rebuild to keep `game_survival` consistent.
                 rebuild_game_survival_from_survival_index(engine)
                 st.success("Saved result.")
 
